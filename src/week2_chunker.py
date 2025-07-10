@@ -1,19 +1,29 @@
-# Week 2: GitHub Repository Processing and Code Chunking - Updated for Groq Integration
-# This handles downloading GitHub repos and breaking code into chunks
+# Week 2: GitHub Repository Processing with ChromaDB, Sentence-Transformers, and LangGraph - Updated Implementation
+# This handles downloading GitHub repos, chunking, ChromaDB storage, and LangGraph EmbedFlow
 
 import git
 import os
 import json
 import hashlib
+import uuid
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
-import httpx  # Changed from requests to httpx for async support
+import asyncio
 from datetime import datetime
 import logging
-from groq import Groq
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+import faiss
 from dotenv import load_dotenv
-import asyncio
+
+# LangGraph imports
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from typing_extensions import TypedDict
 
 # Load environment variables
 load_dotenv()
@@ -36,7 +46,7 @@ class CodeChunk:
     size_chars: int
     size_lines: int
     created_at: str
-    repo_name: str  # Added repo name for better tracking
+    repo_name: str
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -170,19 +180,309 @@ class GitHubRepoProcessor:
         logger.warning(f"Could not read {file_path} with any encoding")
         return None
 
-class GroqCodeChunker:
-    """Handles chunking of code files with Groq integration"""
+class SentenceTransformerEmbedder:
+    """Handles embeddings using sentence-transformers"""
+    
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self.model_name = model_name
+        logger.info(f"Loading sentence-transformer model: {model_name}")
+        self.model = SentenceTransformer(model_name)
+        self.embedding_dim = self.model.get_sentence_embedding_dimension()
+        logger.info(f"Model loaded. Embedding dimension: {self.embedding_dim}")
+    
+    def embed_text(self, text: str) -> List[float]:
+        """Generate embedding for a single text"""
+        try:
+            embedding = self.model.encode(text, convert_to_tensor=False)
+            return embedding.tolist()
+        except Exception as e:
+            logger.error(f"Error generating embedding: {e}")
+            return []
+    
+    def embed_batch(self, texts: List[str], batch_size: int = 32) -> List[List[float]]:
+        """Generate embeddings for a batch of texts"""
+        try:
+            embeddings = self.model.encode(texts, batch_size=batch_size, convert_to_tensor=False)
+            return embeddings.tolist()
+        except Exception as e:
+            logger.error(f"Error generating batch embeddings: {e}")
+            return []
+    
+    def get_embedding_function(self):
+        """Get ChromaDB compatible embedding function"""
+        return embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=self.model_name
+        )
+
+class ChromaDBManager:
+    """Manages ChromaDB collections for code chunks"""
+    
+    def __init__(self, db_path: str = "data/chromadb", collection_name: str = "code_chunks"):
+        self.db_path = Path(db_path)
+        self.db_path.mkdir(parents=True, exist_ok=True)
+        self.collection_name = collection_name
+        
+        # Initialize ChromaDB client
+        self.client = chromadb.PersistentClient(
+            path=str(self.db_path),
+            settings=Settings(anonymized_telemetry=False)
+        )
+        
+        # Initialize embedding function
+        self.embedding_function = SentenceTransformerEmbedder().get_embedding_function()
+        
+        # Get or create collection
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            embedding_function=self.embedding_function
+        )
+        
+        logger.info(f"ChromaDB initialized at {self.db_path}")
+        logger.info(f"Collection: {self.collection_name}")
+    
+    def add_chunks(self, chunks: List[CodeChunk]) -> bool:
+        """Add chunks to ChromaDB"""
+        try:
+            # Prepare data for ChromaDB
+            ids = [chunk.chunk_id for chunk in chunks]
+            documents = []
+            metadatas = []
+            
+            for chunk in chunks:
+                # Create document text for embedding
+                document_text = f"Repository: {chunk.repo_name}\nFile: {chunk.filename}\nLanguage: {chunk.language}\n\n{chunk.content}"
+                documents.append(document_text)
+                
+                # Create metadata
+                metadata = {
+                    "filename": chunk.filename,
+                    "file_path": chunk.file_path,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "language": chunk.language,
+                    "chunk_type": chunk.chunk_type,
+                    "size_chars": chunk.size_chars,
+                    "size_lines": chunk.size_lines,
+                    "created_at": chunk.created_at,
+                    "repo_name": chunk.repo_name
+                }
+                metadatas.append(metadata)
+            
+            # Add to collection in batches
+            batch_size = 100
+            for i in range(0, len(chunks), batch_size):
+                end_idx = min(i + batch_size, len(chunks))
+                batch_ids = ids[i:end_idx]
+                batch_documents = documents[i:end_idx]
+                batch_metadatas = metadatas[i:end_idx]
+                
+                self.collection.add(
+                    ids=batch_ids,
+                    documents=batch_documents,
+                    metadatas=batch_metadatas
+                )
+                
+                logger.info(f"Added batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size} to ChromaDB")
+            
+            logger.info(f"Successfully added {len(chunks)} chunks to ChromaDB")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error adding chunks to ChromaDB: {e}")
+            return False
+    
+    def query_chunks(self, query: str, n_results: int = 5, language_filter: Optional[str] = None) -> Dict:
+        """Query chunks from ChromaDB"""
+        try:
+            where_clause = {}
+            if language_filter:
+                where_clause["language"] = language_filter
+            
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where=where_clause if where_clause else None
+            )
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error querying ChromaDB: {e}")
+            return {}
+    
+    def get_collection_stats(self) -> Dict:
+        """Get statistics about the collection"""
+        try:
+            count = self.collection.count()
+            
+            # Get language distribution
+            all_results = self.collection.get()
+            languages = {}
+            repos = {}
+            
+            for metadata in all_results.get('metadatas', []):
+                lang = metadata.get('language', 'unknown')
+                repo = metadata.get('repo_name', 'unknown')
+                
+                languages[lang] = languages.get(lang, 0) + 1
+                repos[repo] = repos.get(repo, 0) + 1
+            
+            return {
+                'total_chunks': count,
+                'languages': languages,
+                'repositories': repos
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting collection stats: {e}")
+            return {}
+    
+    def delete_collection(self) -> bool:
+        """Delete the collection"""
+        try:
+            self.client.delete_collection(name=self.collection_name)
+            logger.info(f"Deleted collection: {self.collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting collection: {e}")
+            return False
+
+class FAISSManager:
+    """Manages FAISS index for fast similarity search (stub implementation)"""
+    
+    def __init__(self, db_path: str = "data/faiss"):
+        self.db_path = Path(db_path)
+        self.db_path.mkdir(parents=True, exist_ok=True)
+        
+        self.index_file = self.db_path / "index.faiss"
+        self.mapping_file = self.db_path / "doc_mapping.json"
+        
+        self.index = None
+        self.doc_mapping = {}
+        self.embedding_dim = 384  # all-MiniLM-L6-v2 dimension
+        
+        # Initialize embedder
+        self.embedder = SentenceTransformerEmbedder()
+        
+        logger.info(f"FAISS manager initialized at {self.db_path}")
+    
+    def build_index(self, chunks: List[CodeChunk]) -> bool:
+        """Build FAISS index from chunks"""
+        try:
+            logger.info(f"Building FAISS index for {len(chunks)} chunks")
+            
+            # Create index
+            self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner product for cosine similarity
+            
+            # Generate embeddings and build mapping
+            embeddings = []
+            doc_mapping = {}
+            
+            for i, chunk in enumerate(chunks):
+                # Create embedding text
+                text = f"Repository: {chunk.repo_name}\nFile: {chunk.filename}\nLanguage: {chunk.language}\n\n{chunk.content}"
+                
+                # Generate embedding
+                embedding = self.embedder.embed_text(text)
+                if embedding:
+                    embeddings.append(embedding)
+                    doc_mapping[str(i)] = {
+                        'chunk_id': chunk.chunk_id,
+                        'filename': chunk.filename,
+                        'file_path': chunk.file_path,
+                        'language': chunk.language,
+                        'repo_name': chunk.repo_name
+                    }
+                
+                if (i + 1) % 100 == 0:
+                    logger.info(f"Processed {i + 1}/{len(chunks)} embeddings")
+            
+            # Add embeddings to index
+            if embeddings:
+                embeddings_array = np.array(embeddings, dtype=np.float32)
+                
+                # Normalize for cosine similarity
+                faiss.normalize_L2(embeddings_array)
+                
+                # Add to index
+                self.index.add(embeddings_array)
+                
+                # Save index and mapping
+                faiss.write_index(self.index, str(self.index_file))
+                
+                with open(self.mapping_file, 'w') as f:
+                    json.dump(doc_mapping, f, indent=2)
+                
+                self.doc_mapping = doc_mapping
+                
+                logger.info(f"FAISS index built successfully with {len(embeddings)} vectors")
+                return True
+            else:
+                logger.error("No embeddings generated")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error building FAISS index: {e}")
+            return False
+    
+    def load_index(self) -> bool:
+        """Load existing FAISS index"""
+        try:
+            if self.index_file.exists() and self.mapping_file.exists():
+                self.index = faiss.read_index(str(self.index_file))
+                
+                with open(self.mapping_file, 'r') as f:
+                    self.doc_mapping = json.load(f)
+                
+                logger.info(f"FAISS index loaded with {self.index.ntotal} vectors")
+                return True
+            else:
+                logger.warning("FAISS index files not found")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error loading FAISS index: {e}")
+            return False
+    
+    def search(self, query: str, k: int = 5) -> List[Dict]:
+        """Search for similar chunks"""
+        try:
+            if self.index is None:
+                logger.error("FAISS index not loaded")
+                return []
+            
+            # Generate query embedding
+            query_embedding = self.embedder.embed_text(query)
+            if not query_embedding:
+                logger.error("Failed to generate query embedding")
+                return []
+            
+            # Search
+            query_vector = np.array([query_embedding], dtype=np.float32)
+            faiss.normalize_L2(query_vector)
+            
+            scores, indices = self.index.search(query_vector, k)
+            
+            # Format results
+            results = []
+            for score, idx in zip(scores[0], indices[0]):
+                if str(idx) in self.doc_mapping:
+                    result = self.doc_mapping[str(idx)].copy()
+                    result['score'] = float(score)
+                    results.append(result)
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error searching FAISS index: {e}")
+            return []
+
+class CodeChunker:
+    """Handles chunking of code files"""
     
     def __init__(self, chunk_size: int = 75, overlap: int = 10):
         self.chunk_size = chunk_size  # lines per chunk
         self.overlap = overlap  # overlapping lines between chunks
-        self.mcp_base_url = "http://localhost:8000"
-        
-        # Initialize Groq client for direct API calls if needed
-        self.groq_client = None
-        api_key = os.getenv("GROQ_API_KEY")
-        if api_key:
-            self.groq_client = Groq(api_key=api_key)
     
     def create_chunk_id(self, file_path: str, start_line: int, end_line: int, repo_name: str) -> str:
         """Create a unique ID for a chunk"""
@@ -249,73 +549,189 @@ class GroqCodeChunker:
                     break
         
         return chunks
+
+# LangGraph State and Nodes
+class EmbedFlowState(TypedDict):
+    """State for the LangGraph EmbedFlow - managers are not serializable"""
+    chunks: List[Dict]  # Store as dicts instead of CodeChunk objects
+    current_chunk_index: int
+    embeddings_generated: int
+    failed_embeddings: int
+    status: str
+    error_message: Optional[str]
+    # Remove managers from state - they'll be accessed as instance variables
+
+class LangGraphEmbedFlow:
+    """LangGraph flow for embedding generation"""
     
-    def chunk_file(self, file_path: Path, content: str, language: str, repo_name: str) -> List[CodeChunk]:
-        """Chunk a single file"""
-        logger.info(f"Chunking file: {file_path} ({language})")
+    def __init__(self, chroma_manager: ChromaDBManager, faiss_manager: FAISSManager):
+        self.chroma_manager = chroma_manager
+        self.faiss_manager = faiss_manager
         
-        # For now, use simple line-based chunking
-        # In future versions, we could add language-aware chunking
-        return self.chunk_by_lines(content, file_path, language, repo_name)
+        # Create the workflow
+        workflow = StateGraph(EmbedFlowState)
+        
+        # Add nodes
+        workflow.add_node("load_chunks", self.load_chunks_node)
+        workflow.add_node("embed_to_chroma", self.embed_to_chroma_node)
+        workflow.add_node("build_faiss", self.build_faiss_node)
+        workflow.add_node("finalize", self.finalize_node)
+        
+        # Add edges
+        workflow.set_entry_point("load_chunks")
+        workflow.add_edge("load_chunks", "embed_to_chroma")
+        workflow.add_edge("embed_to_chroma", "build_faiss")
+        workflow.add_edge("build_faiss", "finalize")
+        workflow.add_edge("finalize", END)
+        
+        # Compile the graph without checkpointer to avoid serialization issues
+        self.app = workflow.compile()
     
-    async def get_embedding_via_mcp(self, text: str) -> Optional[List[float]]:
-        """Get embedding for text via MCP server (async)"""
+    def load_chunks_node(self, state: EmbedFlowState) -> EmbedFlowState:
+        """Node 1: Load chunks from JSON file"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.mcp_base_url}/embed",
-                    json={"text": text, "model": "text-embedding-3-small"},
-                    timeout=30
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    return result["embedding"]
-                else:
-                    logger.error(f"MCP embedding failed: {response.status_code}")
-                    return None
+            chunks_file = Path("data/chunks.json")
+            if not chunks_file.exists():
+                return {
+                    **state,
+                    "status": "error",
+                    "error_message": "Chunks file not found"
+                }
+            
+            with open(chunks_file, 'r', encoding='utf-8') as f:
+                chunks_data = json.load(f)
+            
+            logger.info(f"Loaded {len(chunks_data)} chunks for embedding")
+            
+            return {
+                **state,
+                "chunks": chunks_data,  # Store as dict data
+                "current_chunk_index": 0,
+                "embeddings_generated": 0,
+                "failed_embeddings": 0,
+                "status": "loaded"
+            }
+            
         except Exception as e:
-            logger.error(f"MCP embedding error: {e}")
-            return None
+            logger.error(f"Error loading chunks: {e}")
+            return {
+                **state,
+                "status": "error",
+                "error_message": str(e)
+            }
     
-    def get_embedding_via_mcp_sync(self, text: str) -> Optional[List[float]]:
-        """Get embedding for text via MCP server (sync)"""
+    def embed_to_chroma_node(self, state: EmbedFlowState) -> EmbedFlowState:
+        """Node 2: Embed chunks to ChromaDB"""
         try:
-            import requests
-            response = requests.post(
-                f"{self.mcp_base_url}/embed",
-                json={"text": text, "model": "text-embedding-3-small"},
-                timeout=30
-            )
-            if response.status_code == 200:
-                result = response.json()
-                return result["embedding"]
+            chunks_data = state["chunks"]
+            
+            # Convert dict data back to CodeChunk objects
+            chunks = [CodeChunk(**chunk_data) for chunk_data in chunks_data]
+            
+            logger.info(f"Adding {len(chunks)} chunks to ChromaDB")
+            
+            success = self.chroma_manager.add_chunks(chunks)
+            
+            if success:
+                return {
+                    **state,
+                    "embeddings_generated": len(chunks),
+                    "status": "chroma_complete"
+                }
             else:
-                logger.error(f"MCP embedding failed: {response.status_code}")
-                return None
+                return {
+                    **state,
+                    "status": "error",
+                    "error_message": "Failed to add chunks to ChromaDB"
+                }
+                
         except Exception as e:
-            logger.error(f"MCP embedding error: {e}")
-            return None
+            logger.error(f"Error embedding to ChromaDB: {e}")
+            return {
+                **state,
+                "status": "error",
+                "error_message": str(e)
+            }
     
-    def get_embedding_direct_groq(self, text: str) -> Optional[List[float]]:
-        """Get embedding directly from Groq API (if they support embeddings)"""
-        if not self.groq_client:
-            logger.warning("Groq client not initialized")
-            return None
-        
+    def build_faiss_node(self, state: EmbedFlowState) -> EmbedFlowState:
+        """Node 3: Build FAISS index"""
         try:
-            # Note: This is a placeholder - Groq might not have embeddings API yet
-            # For now, this will create a consistent hash-based embedding
-            import hashlib
-            import numpy as np
+            chunks_data = state["chunks"]
             
-            text_hash = hashlib.md5(text.encode()).hexdigest()
-            np.random.seed(int(text_hash[:8], 16))
-            embedding = np.random.uniform(-1, 1, 768).tolist()
+            # Convert dict data back to CodeChunk objects
+            chunks = [CodeChunk(**chunk_data) for chunk_data in chunks_data]
             
-            return embedding
+            logger.info(f"Building FAISS index for {len(chunks)} chunks")
+            
+            success = self.faiss_manager.build_index(chunks)
+            
+            if success:
+                return {
+                    **state,
+                    "status": "faiss_complete"
+                }
+            else:
+                return {
+                    **state,
+                    "status": "error",
+                    "error_message": "Failed to build FAISS index"
+                }
+                
         except Exception as e:
-            logger.error(f"Direct Groq embedding error: {e}")
-            return None
+            logger.error(f"Error building FAISS index: {e}")
+            return {
+                **state,
+                "status": "error",
+                "error_message": str(e)
+            }
+    
+    def finalize_node(self, state: EmbedFlowState) -> EmbedFlowState:
+        """Node 4: Finalize the embedding process"""
+        try:
+            embeddings_generated = state["embeddings_generated"]
+            failed_embeddings = state["failed_embeddings"]
+            
+            logger.info(f"Embedding process complete!")
+            logger.info(f"Embeddings generated: {embeddings_generated}")
+            logger.info(f"Failed embeddings: {failed_embeddings}")
+            
+            return {
+                **state,
+                "status": "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in finalize node: {e}")
+            return {
+                **state,
+                "status": "error",
+                "error_message": str(e)
+            }
+    
+    def run_embed_flow(self, chunks: List[CodeChunk]) -> Dict:
+        """Run the embedding flow"""
+        try:
+            # Convert chunks to dict format for serialization
+            chunks_data = [chunk.to_dict() for chunk in chunks]
+            
+            # Initial state
+            initial_state = {
+                "chunks": chunks_data,
+                "current_chunk_index": 0,
+                "embeddings_generated": 0,
+                "failed_embeddings": 0,
+                "status": "initialized",
+                "error_message": None
+            }
+            
+            # Run the workflow
+            result = self.app.invoke(initial_state)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error running embed flow: {e}")
+            return {"status": "error", "error_message": str(e)}
 
 class GitHubCodeProcessor:
     """Main processor that orchestrates the entire workflow"""
@@ -325,10 +741,14 @@ class GitHubCodeProcessor:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         
         self.repo_processor = GitHubRepoProcessor(f"{base_dir}/repos")
-        self.chunker = GroqCodeChunker()  # Updated to use Groq chunker
+        self.chunker = CodeChunker()
+        self.chroma_manager = ChromaDBManager(f"{base_dir}/chromadb")
+        self.faiss_manager = FAISSManager(f"{base_dir}/faiss")
+        
+        # Initialize LangGraph EmbedFlow
+        self.embed_flow = LangGraphEmbedFlow(self.chroma_manager, self.faiss_manager)
         
         self.chunks_file = self.base_dir / "chunks.json"
-        self.embeddings_file = self.base_dir / "embeddings.json"
         self.metadata_file = self.base_dir / "repo_metadata.json"
     
     def process_repository(self, repo_url: str, repo_name: Optional[str] = None) -> Tuple[int, int]:
@@ -364,7 +784,7 @@ class GitHubCodeProcessor:
                 relative_path = file_path.relative_to(repo_path)
                 
                 # Chunk the file
-                chunks = self.chunker.chunk_file(relative_path, content, language, repo_name)
+                chunks = self.chunker.chunk_by_lines(content, relative_path, language, repo_name)
                 all_chunks.extend(chunks)
                 processed_files += 1
                 
@@ -447,128 +867,76 @@ class GitHubCodeProcessor:
         with open(self.metadata_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     
-    async def generate_embeddings_async(self, chunks: Optional[List[CodeChunk]] = None) -> Dict[str, List[float]]:
-        """Generate embeddings for all chunks via MCP (async)"""
+    def run_embedding_flow(self, chunks: Optional[List[CodeChunk]] = None) -> Dict:
+        """Run the LangGraph embedding flow"""
         if chunks is None:
             chunks = self.load_chunks()
         
-        embeddings = {}
-        failed_count = 0
+        if not chunks:
+            logger.error("No chunks found to embed")
+            return {"status": "error", "error_message": "No chunks found"}
         
-        logger.info(f"Generating embeddings for {len(chunks)} chunks via MCP (async)...")
+        # Save chunks to file for LangGraph flow
+        self.save_chunks(chunks)
         
-        # Process in batches to avoid overwhelming the API
-        batch_size = 10
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            
-            # Create tasks for batch
-            tasks = []
-            for chunk in batch:
-                # Create embedding text (filename + content)
-                embedding_text = f"Repository: {chunk.repo_name}\nFile: {chunk.filename}\nLanguage: {chunk.language}\n\n{chunk.content}"
-                tasks.append(self.chunker.get_embedding_via_mcp(embedding_text))
-            
-            # Execute batch
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Process results
-            for chunk, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.error(f"Embedding failed for chunk {chunk.chunk_id}: {result}")
-                    failed_count += 1
-                elif result:
-                    embeddings[chunk.chunk_id] = result
-                else:
-                    failed_count += 1
-                    logger.warning(f"Failed to get embedding for chunk {chunk.chunk_id}")
-            
-            # Progress logging
-            logger.info(f"Processed batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size}")
+        # Run the embedding flow
+        result = self.embed_flow.run_embed_flow(chunks)
         
-        # Save embeddings
-        with open(self.embeddings_file, 'w') as f:
-            json.dump(embeddings, f, indent=2)
-        
-        logger.info(f"Generated {len(embeddings)} embeddings, {failed_count} failed")
-        return embeddings
+        return result
     
-    def generate_embeddings_sync(self, chunks: Optional[List[CodeChunk]] = None) -> Dict[str, List[float]]:
-        """Generate embeddings for all chunks via MCP (sync)"""
-        if chunks is None:
+    def query_similar_chunks(self, query: str, n_results: int = 5, language_filter: Optional[str] = None) -> Dict:
+        """Query similar chunks using ChromaDB"""
+        return self.chroma_manager.query_chunks(query, n_results, language_filter)
+    
+    def search_with_faiss(self, query: str, k: int = 5) -> List[Dict]:
+        """Search using FAISS index"""
+        # Try to load existing index
+        if not self.faiss_manager.load_index():
+            logger.warning("FAISS index not found. Building new index...")
             chunks = self.load_chunks()
-        
-        embeddings = {}
-        failed_count = 0
-        
-        logger.info(f"Generating embeddings for {len(chunks)} chunks via MCP (sync)...")
-        
-        for i, chunk in enumerate(chunks):
-            # Create embedding text (filename + content)
-            embedding_text = f"Repository: {chunk.repo_name}\nFile: {chunk.filename}\nLanguage: {chunk.language}\n\n{chunk.content}"
-            
-            # Get embedding via MCP
-            embedding = self.chunker.get_embedding_via_mcp_sync(embedding_text)
-            
-            if embedding:
-                embeddings[chunk.chunk_id] = embedding
+            if chunks:
+                self.faiss_manager.build_index(chunks)
             else:
-                failed_count += 1
-                logger.warning(f"Failed to get embedding for chunk {chunk.chunk_id}")
-            
-            # Progress logging
-            if (i + 1) % 10 == 0:
-                logger.info(f"Processed {i + 1}/{len(chunks)} embeddings")
+                logger.error("No chunks available for FAISS index")
+                return []
         
-        # Save embeddings
-        with open(self.embeddings_file, 'w') as f:
-            json.dump(embeddings, f, indent=2)
-        
-        logger.info(f"Generated {len(embeddings)} embeddings, {failed_count} failed")
-        return embeddings
+        return self.faiss_manager.search(query, k)
     
-    def load_embeddings(self) -> Dict[str, List[float]]:
-        """Load embeddings from JSON file"""
-        if not self.embeddings_file.exists():
-            return {}
-        
-        with open(self.embeddings_file, 'r') as f:
-            embeddings = json.load(f)
-        
-        logger.info(f"Loaded {len(embeddings)} embeddings from {self.embeddings_file}")
-        return embeddings
+    def get_collection_stats(self) -> Dict:
+        """Get ChromaDB collection statistics"""
+        return self.chroma_manager.get_collection_stats()
     
-    def get_statistics(self) -> Dict:
-        """Get processing statistics"""
+    def get_processing_stats(self) -> Dict:
+        """Get overall processing statistics"""
         chunks = self.load_chunks()
-        embeddings = self.load_embeddings()
         metadata = self.load_metadata()
+        chroma_stats = self.get_collection_stats()
         
         stats = {
             'total_chunks': len(chunks),
-            'total_embeddings': len(embeddings),
-            'coverage': len(embeddings) / len(chunks) if chunks else 0,
+            'chroma_chunks': chroma_stats.get('total_chunks', 0),
+            'coverage': chroma_stats.get('total_chunks', 0) / len(chunks) if chunks else 0,
             'languages': {},
-            'repo_info': metadata
+            'repo_info': metadata,
+            'chroma_stats': chroma_stats
         }
         
         # Language breakdown
         for chunk in chunks:
             lang = chunk.language
             if lang not in stats['languages']:
-                stats['languages'][lang] = {'count': 0, 'with_embeddings': 0}
+                stats['languages'][lang] = {'count': 0}
             stats['languages'][lang]['count'] += 1
-            if chunk.chunk_id in embeddings:
-                stats['languages'][lang]['with_embeddings'] += 1
         
         return stats
+
 
 # CLI Interface for Week 2 - Updated
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="GitHub Code Processor - Week 2 (Groq Integration)")
-    parser.add_argument("command", choices=["process", "embed", "embed-async", "info", "stats"], 
+    parser = argparse.ArgumentParser(description="GitHub Code Processor - Week 2 (ChromaDB + LangGraph)")
+    parser.add_argument("command", choices=["process", "embed", "query", "search", "info", "stats", "clear"], 
                        help="Command to run")
     parser.add_argument("--repo", type=str, 
                        help="GitHub repository URL")
@@ -580,6 +948,14 @@ def main():
                        help="Lines per chunk")
     parser.add_argument("--overlap", type=int, default=10,
                        help="Overlapping lines between chunks")
+    parser.add_argument("--query", type=str,
+                       help="Search query for ChromaDB/FAISS")
+    parser.add_argument("--language", type=str,
+                       help="Filter by programming language")
+    parser.add_argument("--limit", type=int, default=5,
+                       help="Number of results to return")
+    parser.add_argument("--use-faiss", action="store_true",
+                       help="Use FAISS for search instead of ChromaDB")
     
     args = parser.parse_args()
     
@@ -592,7 +968,7 @@ def main():
         
         # Update chunker settings if specified
         if args.chunk_size != 75 or args.overlap != 10:
-            processor.chunker = GroqCodeChunker(args.chunk_size, args.overlap)
+            processor.chunker = CodeChunker(args.chunk_size, args.overlap)
         
         files_count, chunks_count = processor.process_repository(args.repo, args.name)
         print(f"✅ Processing complete!")
@@ -607,21 +983,63 @@ def main():
             print("No chunks found. Run 'process' command first.")
             return
         
-        embeddings = processor.generate_embeddings_sync(chunks)
-        print(f"✅ Embeddings generated (sync)!")
-        print(f"Embeddings created: {len(embeddings)}")
-        print(f"Embeddings saved to: {processor.embeddings_file}")
+        print(f"Running LangGraph embedding flow for {len(chunks)} chunks...")
+        result = processor.run_embedding_flow(chunks)
+        
+        if result.get('status') == 'complete':
+            print(f"✅ Embedding flow completed successfully!")
+            print(f"Embeddings generated: {result.get('embeddings_generated', 0)}")
+            print(f"Failed embeddings: {result.get('failed_embeddings', 0)}")
+            
+            # Show ChromaDB stats
+            stats = processor.get_collection_stats()
+            print(f"ChromaDB total chunks: {stats.get('total_chunks', 0)}")
+            print(f"Languages: {stats.get('languages', {})}")
+        else:
+            print(f"❌ Embedding flow failed: {result.get('error_message', 'Unknown error')}")
     
-    elif args.command == "embed-async":
-        chunks = processor.load_chunks()
-        if not chunks:
-            print("No chunks found. Run 'process' command first.")
+    elif args.command == "query":
+        if not args.query:
+            print("Error: --query is required for query command")
             return
         
-        embeddings = asyncio.run(processor.generate_embeddings_async(chunks))
-        print(f"✅ Embeddings generated (async)!")
-        print(f"Embeddings created: {len(embeddings)}")
-        print(f"Embeddings saved to: {processor.embeddings_file}")
+        print(f"Searching for: '{args.query}'")
+        if args.use_faiss:
+            results = processor.search_with_faiss(args.query, args.limit)
+            print(f"Found {len(results)} results using FAISS:")
+            for i, result in enumerate(results, 1):
+                print(f"\n{i}. {result['filename']} ({result['language']})")
+                print(f"   Score: {result['score']:.4f}")
+                print(f"   Repo: {result['repo_name']}")
+        else:
+            results = processor.query_similar_chunks(args.query, args.limit, args.language)
+            if results.get('documents'):
+                print(f"Found {len(results['documents'][0])} results using ChromaDB:")
+                for i, (doc, metadata, distance) in enumerate(zip(
+                    results['documents'][0], 
+                    results['metadatas'][0], 
+                    results['distances'][0]
+                ), 1):
+                    print(f"\n{i}. {metadata['filename']} ({metadata['language']})")
+                    print(f"   Distance: {distance:.4f}")
+                    print(f"   Repo: {metadata['repo_name']}")
+                    print(f"   Lines: {metadata['start_line']}-{metadata['end_line']}")
+            else:
+                print("No results found.")
+    
+    elif args.command == "search":
+        # Alias for query command
+        if not args.query:
+            print("Error: --query is required for search command")
+            return
+        
+        print(f"Searching for: '{args.query}'")
+        results = processor.search_with_faiss(args.query, args.limit)
+        print(f"Found {len(results)} results using FAISS:")
+        for i, result in enumerate(results, 1):
+            print(f"\n{i}. {result['filename']} ({result['language']})")
+            print(f"   Score: {result['score']:.4f}")
+            print(f"   Repo: {result['repo_name']}")
     
     elif args.command == "info":
         chunks = processor.load_chunks()
@@ -631,13 +1049,13 @@ def main():
         
         metadata = processor.load_metadata()
         
-        print(f"📊 Repository Information:")
+        print(f"Repository Information:")
         if metadata:
             print(f"Repository: {metadata.get('repo_name', 'Unknown')}")
             print(f"URL: {metadata.get('repo_url', 'Unknown')}")
             print(f"Processed: {metadata.get('processed_at', 'Unknown')}")
         
-        print(f"\n📋 Chunk Statistics:")
+        print(f"\nChunk Statistics:")
         print(f"Total chunks: {len(chunks)}")
         
         # Language breakdown
@@ -648,33 +1066,50 @@ def main():
         
         print(f"Languages: {dict(sorted(languages.items(), key=lambda x: x[1], reverse=True))}")
         
-        # Check for embeddings
-        embeddings = processor.load_embeddings()
-        if embeddings:
-            print(f"Embeddings available: {len(embeddings)}")
-            coverage = len(embeddings) / len(chunks) * 100
-            print(f"Coverage: {coverage:.1f}%")
+        # ChromaDB stats
+        chroma_stats = processor.get_collection_stats()
+        if chroma_stats:
+            print(f"\nChromaDB Statistics:")
+            print(f"Total chunks in ChromaDB: {chroma_stats.get('total_chunks', 0)}")
+            print(f"Repositories: {chroma_stats.get('repositories', {})}")
+            print(f"Languages: {chroma_stats.get('languages', {})}")
         else:
-            print("No embeddings found.")
+            print("No ChromaDB data found.")
     
     elif args.command == "stats":
-        stats = processor.get_statistics()
-        print(f"📊 Detailed Statistics:")
+        stats = processor.get_processing_stats()
+        print(f"Detailed Statistics:")
         print(f"Total chunks: {stats['total_chunks']}")
-        print(f"Total embeddings: {stats['total_embeddings']}")
+        print(f"ChromaDB chunks: {stats['chroma_chunks']}")
         print(f"Coverage: {stats['coverage']:.1%}")
         
-        print(f"\n🔤 Language Breakdown:")
+        print(f"\nLanguage Breakdown:")
         for lang, info in sorted(stats['languages'].items(), key=lambda x: x[1]['count'], reverse=True):
-            coverage = info['with_embeddings'] / info['count'] * 100 if info['count'] > 0 else 0
-            print(f"  {lang}: {info['count']} chunks ({coverage:.1f}% embedded)")
+            print(f"  {lang}: {info['count']} chunks")
         
         if stats['repo_info']:
-            print(f"\n🏗️  Repository Info:")
+            print(f"\nRepository Info:")
             repo_info = stats['repo_info']
             print(f"  Name: {repo_info.get('repo_name', 'Unknown')}")
             print(f"  Files: {repo_info.get('total_files', 0)}")
             print(f"  Processed: {repo_info.get('processed_at', 'Unknown')}")
+        
+        chroma_stats = stats.get('chroma_stats', {})
+        if chroma_stats:
+            print(f"\nChromaDB Details:")
+            print(f"  Total chunks: {chroma_stats.get('total_chunks', 0)}")
+            print(f"  Repositories: {list(chroma_stats.get('repositories', {}).keys())}")
+    
+    elif args.command == "clear":
+        confirm = input("Are you sure you want to clear all ChromaDB data? (y/N): ")
+        if confirm.lower() == 'y':
+            success = processor.chroma_manager.delete_collection()
+            if success:
+                print("✅ ChromaDB collection cleared successfully")
+            else:
+                print("❌ Failed to clear ChromaDB collection")
+        else:
+            print("Operation cancelled")
 
 if __name__ == "__main__":
     main()

@@ -167,7 +167,7 @@ TIMEOUT_SECONDS=60
     
     def run_complete_setup(self):
         """Run the complete setup process"""
-        print("🚀 Starting GitHub Code Assistant Setup (Groq Integration)...")
+        print("Starting GitHub Code Assistant Setup (Groq Integration)...")
         print("=" * 60)
         
         # Step 1: Install requirements
@@ -191,7 +191,7 @@ TIMEOUT_SECONDS=60
         self.create_project_structure()
         print("\n" + "=" * 60)
         
-        print("🎉 Setup complete! Next steps:")
+        print("Setup complete! Next steps:")
         print("1. Add your Groq API key to the .env file")
         print("2. Test the MCP server: python week1_groq_setup.py server")
         print("3. Run tests: python week1_groq_setup.py test")
@@ -274,10 +274,6 @@ async def generate_embedding(request: EmbeddingRequest):
     """Generate embeddings via Groq API"""
     try:
         client = get_groq_client()
-        
-        # Note: Groq might not have embedding models yet
-        # For now, we'll simulate embeddings or use OpenAI-compatible endpoint
-        # This is a placeholder for when Groq supports embeddings
         
         # Simulated embedding for testing (consistent hash-based)
         import hashlib
@@ -483,7 +479,7 @@ class Week1Tests:
     
     def run_all_tests(self):
         """Run all Week 1 tests"""
-        print("🧪 Running Week 1 Tests (Groq Integration)...")
+        print("Running Week 1 Tests (Groq Integration)...")
         print("=" * 60)
         
         # Test environment
@@ -505,7 +501,7 @@ class Week1Tests:
         
         print("\n" + "=" * 40)
         print("✅ Week 1 tests complete!")
-        print("\n💡 Next steps:")
+        print("\nNext steps:")
         print("1. Ensure Groq API key is properly configured")
         print("2. Run MCP server in background for development")
         print("3. Begin Week 2 implementation")
@@ -519,7 +515,7 @@ if __name__ == "__main__":
             setup = ProjectSetup()
             setup.run_complete_setup()
         elif sys.argv[1] == "server":
-            print("🚀 Starting MCP Server with Groq Integration...")
+            print("Starting MCP Server with Groq Integration...")
             run_mcp_server()
         elif sys.argv[1] == "test":
             tests = Week1Tests()
@@ -527,13 +523,13 @@ if __name__ == "__main__":
         else:
             print("Usage: python week1_groq_setup.py [setup|server|test]")
     else:
-        print("🤖 GitHub Code Assistant - Week 1 Setup (Groq Integration)")
+        print("GitHub Code Assistant - Week 1 Setup (Groq Integration)")
         print("=" * 60)
         print("Usage:")
         print("  python week1_groq_setup.py setup  - Run complete setup")
         print("  python week1_groq_setup.py server - Start MCP server")
         print("  python week1_groq_setup.py test   - Run tests")
-        print("\n📋 Prerequisites:")
+        print("\nPrerequisites:")
         print("1. Get Groq API key from https://console.groq.com/")
         print("2. Run setup to install dependencies")
         print("3. Configure .env file with your API key")
