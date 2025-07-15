@@ -58,7 +58,7 @@ GROQ_BASE_URL=https://api.groq.com
 
 # Default Models
 DEFAULT_LLM_MODEL=llama3-70b-8192
-DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
+DEFAULT_EMBEDDING_MODEL=microsoft/codebert-base
 
 # MCP Server Configuration
 MCP_HOST=0.0.0.0
