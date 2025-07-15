@@ -59,9 +59,7 @@ class GitHubRepoProcessor:
             '.jsx': 'javascript', '.tsx': 'typescript', '.java': 'java',
             '.cpp': 'cpp', '.c': 'c', '.h': 'c', '.hpp': 'cpp',
             '.cs': 'csharp', '.go': 'go', '.rs': 'rust', '.php': 'php',
-            '.rb': 'ruby', '.md': 'markdown', '.txt': 'text',
-            '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
-            '.xml': 'xml', '.html': 'html', '.css': 'css',
+            '.rb': 'ruby', '.xml': 'xml', '.html': 'html', '.css': 'css',
             '.sql': 'sql', '.sh': 'bash', '.dockerfile': 'dockerfile'
         }
         
@@ -69,7 +67,7 @@ class GitHubRepoProcessor:
         self.skip_dirs = {
             '.git', 'node_modules', '__pycache__', '.pytest_cache',
             'venv', 'env', '.venv', 'build', 'dist', 'target',
-            '.idea', '.vscode', 'coverage', '.next', 'vendor'
+            '.idea', '.vscode', 'coverage', '.next', 'vendor', 'LICENSE', 'README.md', '.md', 'docs'
         }
     
     def clone_repository(self, repo_url: str, local_name: Optional[str] = None) -> Path:
