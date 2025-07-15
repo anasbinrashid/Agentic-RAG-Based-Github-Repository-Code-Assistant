@@ -1,5 +1,5 @@
 # Streamlined GitHub Repository Processor with ChromaDB and LangGraph
-# Focus: ChromaDB primary storage, FAISS for specific search needs, LangGraph workflow
+# Focus: ChromaDB primary storage, LangGraph workflow
 
 import git
 import os
@@ -13,12 +13,13 @@ import logging
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
 # LangGraph imports
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
+import re
+from collections import defaultdict, Counter
 
 # Load environment variables
 load_dotenv()
@@ -46,6 +47,27 @@ class CodeChunk:
     def to_dict(self) -> Dict:
         return asdict(self)
 
+@dataclass
+class RepositoryMetadata:
+    """Comprehensive repository metadata"""
+    repo_name: str
+    repo_url: str
+    clone_path: str
+    description: str
+    primary_language: str
+    languages: Dict[str, int]
+    total_files: int
+    total_lines: int
+    total_chunks: int
+    dependencies: Dict[str, List[str]]
+    readme_content: str
+    license_info: str
+    git_info: Dict[str, str]
+    created_at: str
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
 class GitHubRepoProcessor:
     """Handles GitHub repository cloning and file processing"""
     
@@ -60,14 +82,21 @@ class GitHubRepoProcessor:
             '.cpp': 'cpp', '.c': 'c', '.h': 'c', '.hpp': 'cpp',
             '.cs': 'csharp', '.go': 'go', '.rs': 'rust', '.php': 'php',
             '.rb': 'ruby', '.xml': 'xml', '.html': 'html', '.css': 'css',
-            '.sql': 'sql', '.sh': 'bash', '.dockerfile': 'dockerfile'
+            '.sql': 'sql', '.sh': 'bash', '.dockerfile': 'dockerfile', '.json': 'json',
+            '.md': 'markdown', '.txt': 'text', '.yaml': 'yaml',
+            '.yml': 'yaml', '.kt': 'kotlin',
+            '.swift': 'swift', '.scala': 'scala',
+            '.lua': 'lua', '.pl': 'perl',
+            '.m': 'objective-c',
+            '.dart': 'dart' ,          
+            '.asm': 'assembly'
         }
         
         # Directories to skip
         self.skip_dirs = {
             '.git', 'node_modules', '__pycache__', '.pytest_cache',
             'venv', 'env', '.venv', 'build', 'dist', 'target',
-            '.idea', '.vscode', 'coverage', '.next', 'vendor', 'LICENSE', 'README.md', '.md', 'docs'
+            '.idea', '.vscode', 'coverage', '.next', 'vendor', 'docs'
         }
     
     def clone_repository(self, repo_url: str, local_name: Optional[str] = None) -> Path:
@@ -141,6 +170,128 @@ class GitHubRepoProcessor:
     def get_file_language(self, file_path: Path) -> str:
         """Determine the programming language of a file"""
         return self.supported_extensions.get(file_path.suffix.lower(), 'unknown')
+    
+    def extract_metadata(self, repo_path: Path, repo_name: str, repo_url: str) -> RepositoryMetadata:
+        """Extract comprehensive repository metadata"""
+        logger.info(f"Analyzing repository: {repo_name}")
+        
+        # Find all processable files
+        files = self.find_processable_files(repo_path)
+        
+        # Language analysis
+        languages = Counter()
+        total_lines = 0
+        
+        for file_path in files:
+            content = self.read_file_safely(file_path)
+            if content:
+                lines = len(content.split('\n'))
+                language = self.get_file_language(file_path)
+                languages[language] += lines
+                total_lines += lines
+        
+        # Determine primary language
+        primary_language = languages.most_common(1)[0][0] if languages else 'unknown'
+        
+        # Extract git info
+        git_info = {}
+        try:
+            repo = git.Repo(repo_path)
+            git_info = {
+                'branch': repo.active_branch.name,
+                'commit_hash': repo.head.commit.hexsha,
+                'commit_message': repo.head.commit.message.strip(),
+                'author': str(repo.head.commit.author),
+                'commit_date': repo.head.commit.committed_datetime.isoformat(),
+                'remote_url': next(iter(repo.remotes.origin.urls), 'unknown')
+            }
+        except Exception as e:
+            logger.warning(f"Could not extract git info: {e}")
+            git_info = {'error': str(e)}
+        
+        # Extract README content
+        readme_content = ""
+        readme_files = ['README.md', 'README.rst', 'README.txt', 'README']
+        for readme_file in readme_files:
+            readme_path = repo_path / readme_file
+            if readme_path.exists():
+                content = self.read_file_safely(readme_path)
+                if content:
+                    readme_content = content
+                    break
+        
+        # Extract license info
+        license_info = ""
+        license_files = ['LICENSE', 'LICENSE.md', 'LICENSE.txt', 'COPYING']
+        for license_file in license_files:
+            license_path = repo_path / license_file
+            if license_path.exists():
+                content = self.read_file_safely(license_path)
+                if content:
+                    license_info = content[:500]  # First 500 chars
+                    break
+        
+        # Extract dependencies
+        dependencies = defaultdict(list)
+        
+        # Python dependencies
+        for req_file in ['requirements.txt', 'requirements-dev.txt', 'Pipfile', 'pyproject.toml']:
+            req_path = repo_path / req_file
+            if req_path.exists():
+                content = self.read_file_safely(req_path)
+                if content:
+                    if req_file.endswith('.txt'):
+                        deps = re.findall(r'^([a-zA-Z0-9-_]+)', content, re.MULTILINE)
+                        dependencies['python'].extend(deps)
+        
+        # JavaScript dependencies
+        package_json = repo_path / 'package.json'
+        if package_json.exists():
+            content = self.read_file_safely(package_json)
+            if content:
+                try:
+                    data = json.loads(content)
+                    deps = list(data.get('dependencies', {}).keys())
+                    dev_deps = list(data.get('devDependencies', {}).keys())
+                    dependencies['javascript'].extend(deps + dev_deps)
+                except:
+                    pass
+        
+        # Java dependencies
+        pom_xml = repo_path / 'pom.xml'
+        if pom_xml.exists():
+            content = self.read_file_safely(pom_xml)
+            if content:
+                deps = re.findall(r'<artifactId>(.*?)</artifactId>', content)
+                dependencies['java'].extend(deps)
+        
+        # Go dependencies
+        go_mod = repo_path / 'go.mod'
+        if go_mod.exists():
+            content = self.read_file_safely(go_mod)
+            if content:
+                deps = re.findall(r'require\s+([^\s]+)', content)
+                dependencies['go'].extend(deps)
+        
+        # Create metadata object
+        metadata = RepositoryMetadata(
+            repo_name=repo_name,
+            repo_url=repo_url,
+            clone_path=str(repo_path),
+            description=readme_content[:500] if readme_content else "",
+            primary_language=primary_language,
+            languages=dict(languages),
+            total_files=len(files),
+            total_lines=total_lines,
+            total_chunks=0,  # Will be updated after chunking
+            dependencies=dict(dependencies),
+            readme_content=readme_content,
+            license_info=license_info,
+            git_info=git_info,
+            created_at=datetime.now().isoformat()
+        )
+        
+        return metadata
 
 class CodeChunker:
     """Handles chunking of code files"""
@@ -211,6 +362,7 @@ class CodeChunker:
                     break
         
         return chunks
+    
 
 class ChromaDBManager:
     """Manages ChromaDB collections for code chunks"""
@@ -231,40 +383,103 @@ class ChromaDBManager:
             model_name="microsoft/codebert-base"
         )
         
-        # Get or create collection
+        # Get or create collections
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
             embedding_function=self.embedding_function
         )
+        self.metadata_collection = self.client.get_or_create_collection(
+            name=f"{collection_name}_metadata",
+            embedding_function=self.embedding_function
+        )
         
         logger.info(f"ChromaDB initialized at {self.db_path}")
+    def serialize_for_metadata(self, value: Any) -> str:
+        """Convert complex data types to strings for ChromaDB metadata"""
+        if isinstance(value, (list, dict)):
+            return json.dumps(value)
+        elif isinstance(value, (int, float, bool, str)) or value is None:
+            return value
+        else:
+            return str(value)
+
+    def add_repository_metadata(self, metadata: RepositoryMetadata) -> bool:
+        """Add repository metadata to ChromaDB"""
+        try:
+            # Create searchable document from metadata
+            document_text = f"""
+            Repository: {metadata.repo_name}
+            Description: {metadata.description}
+            Primary Language: {metadata.primary_language}
+            Languages: {', '.join(metadata.languages.keys())}
+            Dependencies: {', '.join([dep for deps in metadata.dependencies.values() for dep in deps])}
+            README: {metadata.readme_content[:1000]}
+            """
+            raw_meta = metadata.to_dict()
+            safe_meta = {
+    k: self.serialize_for_metadata(v)
+    for k, v in raw_meta.items()
+}
+            # Store metadata
+            self.metadata_collection.add(
+                ids=[f"repo_{metadata.repo_name}"],
+                documents=[document_text],
+                metadatas=[safe_meta]
+            )
+            
+            logger.info(f"Added metadata for repository: {metadata.repo_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error adding repository metadata: {e}")
+            return False
     
-    def add_chunks(self, chunks: List[CodeChunk]) -> bool:
-        """Add chunks to ChromaDB"""
+    def add_chunks_with_metadata(self, chunks: List[CodeChunk], repo_metadata: RepositoryMetadata) -> bool:
+        """Add chunks with enhanced metadata"""
         try:
             ids = [chunk.chunk_id for chunk in chunks]
             documents = []
             metadatas = []
             
             for chunk in chunks:
-                # Create document for embedding
-                document_text = f"Repository: {chunk.repo_name}\nFile: {chunk.filename}\nLanguage: {chunk.language}\n\n{chunk.content}"
+                # Enhanced document text with repository context
+                document_text = f"""
+                Repository: {repo_metadata.repo_name}
+                Description: {repo_metadata.description[:200]}
+                Primary Language: {repo_metadata.primary_language}
+                File: {chunk.filename}
+                Language: {chunk.language}
+                Dependencies: {', '.join(repo_metadata.dependencies.get(chunk.language, []))}
+                
+                {chunk.content}
+                """
                 documents.append(document_text)
                 
-                # Create metadata
-                metadata = {
-                    "filename": chunk.filename,
-                    "file_path": chunk.file_path,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "language": chunk.language,
-                    "chunk_type": chunk.chunk_type,
-                    "size_chars": chunk.size_chars,
-                    "size_lines": chunk.size_lines,
-                    "created_at": chunk.created_at,
-                    "repo_name": chunk.repo_name
+                # Enhanced metadata
+                raw_metadata = {
+                        "filename": chunk.filename,
+                        "file_path": chunk.file_path,
+                        "start_line": chunk.start_line,
+    "end_line": chunk.end_line,
+    "language": chunk.language,
+    "chunk_type": chunk.chunk_type,
+    "size_chars": chunk.size_chars,
+    "size_lines": chunk.size_lines,
+    "created_at": chunk.created_at,
+    "repo_name": chunk.repo_name,
+    "repo_primary_language": repo_metadata.primary_language,
+    "repo_description": repo_metadata.description,
+    "repo_total_files": repo_metadata.total_files,
+    "repo_languages": list(repo_metadata.languages.keys()),
+    "repo_dependencies": repo_metadata.dependencies.get(chunk.language, [])
+            
                 }
-                metadatas.append(metadata)
+                safe_metadata = {
+    k: self.serialize_for_metadata(v)
+    for k, v in raw_metadata.items()
+}
+                metadatas.append(safe_metadata)
+                
             
             # Add in batches
             batch_size = 100
@@ -277,30 +492,65 @@ class ChromaDBManager:
                 )
                 logger.info(f"Added batch {i//batch_size + 1} to ChromaDB")
             
-            logger.info(f"Successfully added {len(chunks)} chunks to ChromaDB")
+            logger.info(f"Successfully added {len(chunks)} chunks with metadata to ChromaDB")
             return True
             
         except Exception as e:
-            logger.error(f"Error adding chunks to ChromaDB: {e}")
+            logger.error(f"Error adding chunks with metadata to ChromaDB: {e}")
             return False
     
-    def query_chunks(self, query: str, n_results: int = 5, language_filter: Optional[str] = None) -> Dict:
-        """Query chunks from ChromaDB"""
+    def search_repositories(self, query: str, n_results: int = 3) -> List[Dict]:
+        """Search for relevant repositories based on query"""
         try:
-            where_clause = {}
-            if language_filter:
-                where_clause["language"] = language_filter
-            
-            results = self.collection.query(
+            results = self.metadata_collection.query(
                 query_texts=[query],
-                n_results=n_results,
-                where=where_clause if where_clause else None
+                n_results=n_results
             )
             
-            return results
+            relevant_repos = []
+            if results.get('metadatas'):
+                for metadata, distance in zip(results['metadatas'][0], results['distances'][0]):
+                    relevant_repos.append({
+                        'repo_name': metadata['repo_name'],
+                        'relevance_score': 1 - distance,
+                        'primary_language': metadata['primary_language'],
+                        'description': metadata['description'],
+                        'languages': metadata['languages']
+                    })
+            
+            return relevant_repos
             
         except Exception as e:
-            logger.error(f"Error querying ChromaDB: {e}")
+            logger.error(f"Error searching repositories: {e}")
+            return []
+    
+    def intelligent_query(self, query: str, n_results: int = 5) -> Dict:
+        """Intelligent query that first finds relevant repositories, then searches chunks"""
+        try:
+            # Step 1: Find relevant repositories
+            relevant_repos = self.search_repositories(query, n_results=3)
+            
+            # Step 2: Search chunks with repository context
+            where_clause = None
+            if relevant_repos:
+                repo_names = [repo['repo_name'] for repo in relevant_repos]
+                where_clause = {"repo_name": {"$in": repo_names}}
+            
+            # Search chunks
+            chunk_results = self.collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where=where_clause
+            )
+            
+            return {
+                'relevant_repositories': relevant_repos,
+                'chunk_results': chunk_results,
+                'query': query
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in intelligent query: {e}")
             return {}
     
     def get_collection_stats(self) -> Dict:
@@ -340,7 +590,7 @@ class ProcessingState(TypedDict):
     chunks_embedded: int
     status: str
     error_message: Optional[str]
-    chunks_data: List[Dict]  # Store chunks as dicts for serialization
+    chunks_data: List[Dict]
 
 class GitHubProcessingWorkflow:
     """LangGraph workflow for GitHub repository processing"""
@@ -457,16 +707,29 @@ class GitHubProcessingWorkflow:
             }
     
     def embed_chunks_node(self, state: ProcessingState) -> ProcessingState:
-        """Node 4: Embed chunks into ChromaDB"""
+        """Node 4: Embed chunks with metadata into ChromaDB"""
         try:
             # Convert back to CodeChunk objects
             chunks = [CodeChunk(**chunk_data) for chunk_data in state['chunks_data']]
             
-            logger.info(f"Embedding {len(chunks)} chunks into ChromaDB")
+            # Get repository metadata
+            repo_path = Path(state['repo_path'])
+            repo_metadata = self.repo_processor.extract_metadata(
+                repo_path, state['repo_name'], state['repo_url']
+            )
             
-            success = self.chroma_manager.add_chunks(chunks)
+            # Update chunk count in metadata
+            repo_metadata.total_chunks = len(chunks)
             
-            if success:
+            logger.info(f"Embedding {len(chunks)} chunks with metadata into ChromaDB")
+            
+            # Add repository metadata
+            metadata_success = self.chroma_manager.add_repository_metadata(repo_metadata)
+            
+            # Add chunks with enhanced metadata
+            chunks_success = self.chroma_manager.add_chunks_with_metadata(chunks, repo_metadata)
+            
+            if metadata_success and chunks_success:
                 return {
                     **state,
                     "chunks_embedded": len(chunks),
@@ -476,7 +739,7 @@ class GitHubProcessingWorkflow:
                 return {
                     **state,
                     "status": "error",
-                    "error_message": "Failed to embed chunks into ChromaDB"
+                    "error_message": "Failed to embed chunks or metadata into ChromaDB"
                 }
                 
         except Exception as e:
@@ -531,9 +794,9 @@ class GitHubProcessingWorkflow:
         
         return result
     
-    def query_repository(self, query: str, n_results: int = 5, language_filter: Optional[str] = None) -> Dict:
-        """Query the processed repository"""
-        return self.chroma_manager.query_chunks(query, n_results, language_filter)
+    def intelligent_query_repository(self, query: str, n_results: int = 5) -> Dict:
+        """Intelligent query using repository metadata"""
+        return self.chroma_manager.intelligent_query(query, n_results)
     
     def get_stats(self) -> Dict:
         """Get processing statistics"""
@@ -547,16 +810,7 @@ class MCPCodeProcessor:
         self.workflow = GitHubProcessingWorkflow(base_dir)
     
     def process_repository(self, repo_url: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Process a GitHub repository
-        
-        Args:
-            repo_url: GitHub repository URL
-            repo_name: Optional local name for the repository
-            
-        Returns:
-            Dictionary with processing results
-        """
+        """Process a GitHub repository"""
         try:
             result = self.workflow.process_repository(repo_url, repo_name)
             
@@ -577,40 +831,43 @@ class MCPCodeProcessor:
     
     def search_code(self, query: str, limit: int = 5, language: Optional[str] = None) -> Dict[str, Any]:
         """
-        Search for code chunks
-        
-        Args:
-            query: Search query
-            limit: Maximum number of results
-            language: Filter by programming language
-            
-        Returns:
-            Dictionary with search results
+        Intelligent search for code chunks using repository metadata
         """
         try:
-            results = self.workflow.query_repository(query, limit, language)
+            # Use intelligent query
+            results = self.workflow.intelligent_query_repository(query, limit)
             
-            if not results.get('documents'):
-                return {"success": True, "results": []}
+            if not results.get('chunk_results', {}).get('documents'):
+                return {"success": True, "results": [], "relevant_repositories": []}
             
+            chunk_results = results['chunk_results']
             formatted_results = []
+            
             for doc, metadata, distance in zip(
-                results['documents'][0], 
-                results['metadatas'][0], 
-                results['distances'][0]
+                chunk_results['documents'][0], 
+                chunk_results['metadatas'][0], 
+                chunk_results['distances'][0]
             ):
                 formatted_results.append({
                     "filename": metadata['filename'],
                     "language": metadata['language'],
                     "repo_name": metadata['repo_name'],
+                    "repo_primary_language": metadata.get('repo_primary_language', 'unknown'),
+                    "repo_description": metadata.get('repo_description', ''),
                     "lines": f"{metadata['start_line']}-{metadata['end_line']}",
-                    "relevance_score": 1 - distance,  # Convert distance to relevance
-                    "content_preview": doc[:200] + "..." if len(doc) > 200 else doc
+                    "relevance_score": 1 - distance,
+                    "content_preview": doc[:200] + "..." if len(doc) > 200 else doc,
+                    "repo_context": {
+                        "total_files": metadata.get('repo_total_files', 0),
+                        "languages": metadata.get('repo_languages', []),
+                        "dependencies": metadata.get('repo_dependencies', [])
+                    }
                 })
             
             return {
                 "success": True,
                 "results": formatted_results,
+                "relevant_repositories": results.get('relevant_repositories', []),
                 "total_found": len(formatted_results)
             }
             

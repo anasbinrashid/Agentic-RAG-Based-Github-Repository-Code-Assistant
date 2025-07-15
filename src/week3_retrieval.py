@@ -45,6 +45,17 @@ class CodeRetriever:
                 embedding_function=self.embedding_function
             )
             
+            # Try to get metadata collection
+            try:
+                self.metadata_collection = self.client.get_collection(
+                    name=f"{collection_name}_metadata",
+                    embedding_function=self.embedding_function
+                )
+                logger.info(f"Connected to metadata collection")
+            except Exception as e:
+                logger.warning(f"Metadata collection not found: {e}")
+                self.metadata_collection = None
+            
             logger.info(f"Connected to ChromaDB collection: {self.collection_name}")
             
         except Exception as e:
@@ -111,38 +122,84 @@ class CodeRetriever:
         """Search for code chunks filtered by repository"""
         return self.search(query, n_results, {'repo_name': repo_name})
     
-    def search_by_file(self, query: str, filename: str, n_results: int = 5) -> List[Dict]:
-        """Search for code chunks filtered by filename"""
-        return self.search(query, n_results, {'filename': filename})
-    
-    def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict]:
-        """Get a specific chunk by its ID"""
+    def intelligent_search(self, query: str, n_results: int = 5) -> Dict:
+        """
+        Intelligent search that considers repository context
+        """
         try:
-            result = self.collection.get(ids=[chunk_id])
+            # First, find relevant repositories if metadata collection exists
+            relevant_repos = []
+            if self.metadata_collection:
+                repo_results = self.metadata_collection.query(
+                    query_texts=[query],
+                    n_results=3
+                )
+                
+                if repo_results.get('metadatas'):
+                    for metadata, distance in zip(repo_results['metadatas'][0], repo_results['distances'][0]):
+                        relevant_repos.append({
+                            'repo_name': metadata['repo_name'],
+                            'relevance_score': 1 - distance,
+                            'primary_language': metadata['primary_language'],
+                            'description': metadata['description']
+                        })
             
-            if result.get('documents') and result['documents']:
-                return {
-                    'chunk_id': chunk_id,
-                    'content': result['documents'][0],
-                    'metadata': result['metadatas'][0]
-                }
-            return None
+            # Search chunks with repository context
+            where_clause = None
+            if relevant_repos:
+                repo_names = [repo['repo_name'] for repo in relevant_repos]
+                where_clause = {"repo_name": {"$in": repo_names}}
+            
+            # Perform search
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where=where_clause
+            )
+            
+            # Format results with repository context
+            formatted_results = []
+            if results.get('documents') and results['documents'][0]:
+                for i, (doc, metadata, distance) in enumerate(zip(
+                    results['documents'][0],
+                    results['metadatas'][0],
+                    results['distances'][0]
+                )):
+                    formatted_results.append({
+                        'rank': i + 1,
+                        'relevance_score': round(1 - distance, 3),
+                        'filename': metadata['filename'],
+                        'file_path': metadata['file_path'],
+                        'language': metadata['language'],
+                        'repo_name': metadata['repo_name'],
+                        'lines': f"{metadata['start_line']}-{metadata['end_line']}",
+                        'chunk_type': metadata['chunk_type'],
+                        'size_lines': metadata['size_lines'],
+                        'content': doc,
+                        'metadata': metadata,
+                        'repo_context': {
+                            'total_files': metadata.get('repo_total_files', 0),
+                            'languages': metadata.get('repo_languages', []),
+                            'dependencies': metadata.get('repo_dependencies', [])
+                        }
+                    })
+            
+            return {
+                'results': formatted_results,
+                'relevant_repositories': relevant_repos,
+                'query': query
+            }
             
         except Exception as e:
-            logger.error(f"Failed to get chunk {chunk_id}: {e}")
-            return None
+            logger.error(f"Intelligent search failed: {e}")
+            return {'results': [], 'relevant_repositories': [], 'query': query}
     
     def get_available_languages(self) -> List[str]:
         """Get list of available programming languages"""
         try:
             all_items = self.collection.get()
-            languages = set()
-            
-            for metadata in all_items.get('metadatas', []):
-                languages.add(metadata.get('language', 'unknown'))
-            
+            languages = {metadata.get('language', 'unknown') for metadata in all_items.get('metadatas', [])}
             return sorted(list(languages))
-            
         except Exception as e:
             logger.error(f"Failed to get languages: {e}")
             return []
@@ -151,13 +208,8 @@ class CodeRetriever:
         """Get list of available repositories"""
         try:
             all_items = self.collection.get()
-            repositories = set()
-            
-            for metadata in all_items.get('metadatas', []):
-                repositories.add(metadata.get('repo_name', 'unknown'))
-            
+            repositories = {metadata.get('repo_name', 'unknown') for metadata in all_items.get('metadatas', [])}
             return sorted(list(repositories))
-            
         except Exception as e:
             logger.error(f"Failed to get repositories: {e}")
             return []
@@ -209,34 +261,37 @@ class RetrievalInterface:
     
     def search_interactive(self):
         """Interactive search interface"""
-        print("🔍 Code Retrieval System")
-        print("=" * 50)
+        print("🔍 Enhanced Code Retrieval System")
+        print("=" * 60)
         
         while True:
             print("\nOptions:")
             print("1. Search code")
-            print("2. Search by language")
-            print("3. Search by repository")
-            print("4. View available languages")
-            print("5. View available repositories")
-            print("6. View collection stats")
-            print("7. Exit")
+            print("2. Intelligent search (with repository context)")
+            print("3. Search by language")
+            print("4. Search by repository")
+            print("5. View available languages")
+            print("6. View available repositories")
+            print("7. View collection stats")
+            print("8. Exit")
             
-            choice = input("\nEnter your choice (1-7): ").strip()
+            choice = input("\nEnter your choice (1-8): ").strip()
             
             if choice == '1':
                 self._search_code()
             elif choice == '2':
-                self._search_by_language()
+                self._intelligent_search()
             elif choice == '3':
-                self._search_by_repository()
+                self._search_by_language()
             elif choice == '4':
-                self._show_languages()
+                self._search_by_repository()
             elif choice == '5':
-                self._show_repositories()
+                self._show_languages()
             elif choice == '6':
-                self._show_stats()
+                self._show_repositories()
             elif choice == '7':
+                self._show_stats()
+            elif choice == '8':
                 print("Goodbye! 👋")
                 break
             else:
@@ -256,6 +311,30 @@ class RetrievalInterface:
         
         results = self.retriever.search(query, limit)
         self._display_results(results, query)
+    
+    def _intelligent_search(self):
+        """Intelligent search with repository context"""
+        query = input("Enter your search query: ").strip()
+        if not query:
+            print("Query cannot be empty.")
+            return
+        
+        try:
+            limit = int(input("Number of results (default 5): ").strip() or "5")
+        except ValueError:
+            limit = 5
+        
+        results = self.retriever.intelligent_search(query, limit)
+        
+        # Display relevant repositories first
+        if results.get('relevant_repositories'):
+            print(f"\n📚 Relevant Repositories:")
+            for repo in results['relevant_repositories']:
+                print(f"  • {repo['repo_name']} ({repo['primary_language']}) - Score: {repo['relevance_score']:.3f}")
+                print(f"    Description: {repo['description'][:100]}...")
+        
+        # Display search results
+        self._display_intelligent_results(results['results'], query)
     
     def _search_by_language(self):
         """Search filtered by programming language"""
@@ -355,20 +434,7 @@ class RetrievalInterface:
             print(f"   Relevance: {result['relevance_score']}")
             print(f"   Chunk type: {result['chunk_type']}")
             
-            # Show content preview
-            content = result['content']
-            if len(content) > 300:
-                preview = content[:300] + "..."
-            else:
-                preview = content
-            
-            print(f"   Preview:")
-            print("   " + "─" * 40)
-            for line in preview.split('\n')[:10]:  # Show first 10 lines
-                print(f"   {line}")
-            if len(content.split('\n')) > 10:
-                print("   ...")
-            print("   " + "─" * 40)
+            self._show_preview(result['content'])
         
         # Ask if user wants to see full content
         if results:
@@ -380,6 +446,36 @@ class RetrievalInterface:
                         self._show_full_content(results[idx])
             except (ValueError, KeyboardInterrupt):
                 pass
+    
+    def _display_intelligent_results(self, results: List[Dict], query: str):
+        """Display intelligent search results with repository context"""
+        if not results:
+            print(f"\n❌ No results found for query: '{query}'")
+            return
+        
+        print(f"\n✅ Found {len(results)} results for query: '{query}'")
+        print("=" * 80)
+        
+        for result in results:
+            print(f"\n{result['rank']}. {result['filename']} ({result['language']})")
+            print(f"   Repository: {result['repo_name']}")
+            print(f"   Lines: {result['lines']}")
+            print(f"   Relevance: {result['relevance_score']}")
+            print(f"   Context: {result['repo_context']['total_files']} files, Languages: {', '.join(result['repo_context']['languages'][:3])}")
+            
+            self._show_preview(result['content'])
+    
+    def _show_preview(self, content: str):
+        """Show content preview"""
+        preview = content[:300] + "..." if len(content) > 300 else content
+        
+        print(f"   Preview:")
+        print("   " + "─" * 40)
+        for line in preview.split('\n')[:10]:
+            print(f"   {line}")
+        if len(content.split('\n')) > 10:
+            print("   ...")
+        print("   " + "─" * 40)
     
     def _show_full_content(self, result: Dict):
         """Show full content of a specific result"""
