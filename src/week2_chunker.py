@@ -380,7 +380,7 @@ class ChromaDBManager:
         
         # Initialize embedding function
         self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="microsoft/codebert-base"
+            model_name="jinaai/jina-embeddings-v2-base-code"
         )
         
         # Get or create collections

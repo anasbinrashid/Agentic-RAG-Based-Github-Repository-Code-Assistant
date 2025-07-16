@@ -38,7 +38,7 @@ class AgentResponse:
 class GroqCodeAgent:
     """Intelligent code assistant using Groq API and retrieval system"""
     
-    def __init__(self, db_path: str = "data/chromadb", model: str = "llama3-8b-8192"):
+    def __init__(self, db_path: str = "data/chromadb", model: str = "llama3-70b-8192"):
         # Initialize Groq client
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         if not self.groq_api_key:
@@ -506,7 +506,7 @@ Answer:"""
 class InteractiveCodeAgent:
     """Interactive interface for the code agent"""
     
-    def __init__(self, db_path: str = "data/chromadb", model: str = "llama3-8b-8192"):
+    def __init__(self, db_path: str = "data/chromadb", model: str = "llama3-70b-8192"):
         self.agent = GroqCodeAgent(db_path, model)
         self.conversation_history = []
     

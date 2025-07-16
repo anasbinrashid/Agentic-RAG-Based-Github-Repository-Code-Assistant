@@ -36,7 +36,7 @@ class CodeRetriever:
             
             # Initialize embedding function
             self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="microsoft/codebert-base"  # Using CodeBERT for code embeddings
+                model_name="jinaai/jina-embeddings-v2-base-code"  # Using CodeBERT for code embeddings
             )
             
             # Get existing collection
