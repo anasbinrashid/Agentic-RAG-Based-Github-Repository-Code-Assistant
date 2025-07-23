@@ -22,159 +22,133 @@ logger = logging.getLogger(__name__)
 
 class CodeRetriever:
     """Simple and clean code chunk retrieval system"""
-    
+
     def __init__(self, db_path: str = "data/chromadb", collection_name: str = "code_chunks"):
         self.db_path = Path(db_path)
         self.collection_name = collection_name
-        
-        # Initialize ChromaDB client
+
         try:
             self.client = chromadb.PersistentClient(
                 path=str(self.db_path),
                 settings=Settings(anonymized_telemetry=False)
             )
-            
-            # Initialize embedding function
             self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="jinaai/jina-embeddings-v2-base-code"  # Using CodeBERT for code embeddings
+                model_name="jinaai/jina-embeddings-v2-base-code"
             )
-            
-            # Get existing collection
             self.collection = self.client.get_collection(
                 name=self.collection_name,
                 embedding_function=self.embedding_function
             )
-            
-            # Try to get metadata collection
             try:
                 self.metadata_collection = self.client.get_collection(
                     name=f"{collection_name}_metadata",
                     embedding_function=self.embedding_function
                 )
-                logger.info(f"Connected to metadata collection")
+                logger.info("Connected to metadata collection")
             except Exception as e:
                 logger.warning(f"Metadata collection not found: {e}")
                 self.metadata_collection = None
-            
+
             logger.info(f"Connected to ChromaDB collection: {self.collection_name}")
-            
+
         except Exception as e:
             logger.error(f"Failed to connect to ChromaDB: {e}")
             raise
-    
+
+    def _calculate_relevance_score(self, distance: float) -> float:
+        if distance is None:
+            return 0.0
+        if distance <= 0:
+            return 1.0
+        elif distance >= 2.0:
+            return 0.0
+        else:
+            return 1.0 - (distance / 2.0)
+
     def search(self, query: str, n_results: int = 5, filters: Optional[Dict] = None) -> List[Dict]:
-        """
-        Search for code chunks based on query
-        
-        Args:
-            query: Search query string
-            n_results: Number of results to return
-            filters: Optional filters (e.g., {'language': 'python'})
-            
-        Returns:
-            List of search results with metadata
-        """
         try:
-            # Build where clause from filters
             where_clause = filters if filters else None
-            
-            # Perform search
             results = self.collection.query(
                 query_texts=[query],
                 n_results=n_results,
-                where=where_clause
+                where=where_clause,
+                include=['documents', 'metadatas', 'distances']
             )
-            
-            # Format results
             formatted_results = []
             if results.get('documents') and results['documents'][0]:
-                for i, (doc, metadata, distance) in enumerate(zip(
-                    results['documents'][0],
-                    results['metadatas'][0],
-                    results['distances'][0]
-                )):
+                distances = results.get('distances', [[]])[0] if results.get('distances') else []
+                for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
+                    distance = distances[i] if i < len(distances) else None
+                    relevance_score = self._calculate_relevance_score(distance)
                     formatted_results.append({
                         'rank': i + 1,
-                        'relevance_score': round(1 - distance, 3),  # Convert distance to relevance
-                        'filename': metadata['filename'],
-                        'file_path': metadata['file_path'],
-                        'language': metadata['language'],
-                        'repo_name': metadata['repo_name'],
-                        'lines': f"{metadata['start_line']}-{metadata['end_line']}",
-                        'chunk_type': metadata['chunk_type'],
-                        'size_lines': metadata['size_lines'],
+                        'relevance_score': round(relevance_score, 3),
+                        'distance': distance,
+                        'filename': metadata.get('filename', 'Unknown'),
+                        'file_path': metadata.get('file_path', 'Unknown'),
+                        'language': metadata.get('language', 'Unknown'),
+                        'repo_name': metadata.get('repo_name', 'Unknown'),
+                        'lines': f"{metadata.get('start_line', 'Unknown')}-{metadata.get('end_line', 'Unknown')}",
+                        'chunk_type': metadata.get('chunk_type', 'Unknown'),
+                        'size_lines': metadata.get('size_lines', 0),
                         'content': doc,
                         'metadata': metadata
                     })
-            
+            formatted_results.sort(key=lambda x: x['relevance_score'], reverse=True)
             logger.info(f"Found {len(formatted_results)} results for query: '{query}'")
             return formatted_results
-            
         except Exception as e:
             logger.error(f"Search failed: {e}")
             return []
-    
+
     def search_by_language(self, query: str, language: str, n_results: int = 5) -> List[Dict]:
-        """Search for code chunks filtered by programming language"""
         return self.search(query, n_results, {'language': language})
-    
+
     def search_by_repository(self, query: str, repo_name: str, n_results: int = 5) -> List[Dict]:
-        """Search for code chunks filtered by repository"""
         return self.search(query, n_results, {'repo_name': repo_name})
-    
+
     def intelligent_search(self, query: str, n_results: int = 5) -> Dict:
-        """
-        Intelligent search that considers repository context
-        """
         try:
-            # First, find relevant repositories if metadata collection exists
             relevant_repos = []
             if self.metadata_collection:
                 repo_results = self.metadata_collection.query(
                     query_texts=[query],
-                    n_results=3
+                    n_results=3,
+                    include=['documents', 'metadatas', 'distances']
                 )
-                
-                if repo_results.get('metadatas'):
+                if repo_results.get('metadatas') and repo_results.get('distances'):
                     for metadata, distance in zip(repo_results['metadatas'][0], repo_results['distances'][0]):
+                        relevance_score = self._calculate_relevance_score(distance)
                         relevant_repos.append({
-                            'repo_name': metadata['repo_name'],
-                            'relevance_score': 1 - distance,
-                            'primary_language': metadata['primary_language'],
-                            'description': metadata['description']
+                            'repo_name': metadata.get('repo_name', 'Unknown'),
+                            'relevance_score': round(relevance_score, 3),
+                            'primary_language': metadata.get('primary_language', 'Unknown'),
+                            'description': metadata.get('description', 'No description available')
                         })
-            
-            # Search chunks with repository context
-            where_clause = None
-            if relevant_repos:
-                repo_names = [repo['repo_name'] for repo in relevant_repos]
-                where_clause = {"repo_name": {"$in": repo_names}}
-            
-            # Perform search
+            where_clause = {"repo_name": {"$in": [repo['repo_name'] for repo in relevant_repos]}} if relevant_repos else None
             results = self.collection.query(
                 query_texts=[query],
                 n_results=n_results,
-                where=where_clause
+                where=where_clause,
+                include=['documents', 'metadatas', 'distances']
             )
-            
-            # Format results with repository context
             formatted_results = []
             if results.get('documents') and results['documents'][0]:
-                for i, (doc, metadata, distance) in enumerate(zip(
-                    results['documents'][0],
-                    results['metadatas'][0],
-                    results['distances'][0]
-                )):
+                distances = results.get('distances', [[]])[0] if results.get('distances') else []
+                for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
+                    distance = distances[i] if i < len(distances) else None
+                    relevance_score = self._calculate_relevance_score(distance)
                     formatted_results.append({
                         'rank': i + 1,
-                        'relevance_score': round(1 - distance, 3),
-                        'filename': metadata['filename'],
-                        'file_path': metadata['file_path'],
-                        'language': metadata['language'],
-                        'repo_name': metadata['repo_name'],
-                        'lines': f"{metadata['start_line']}-{metadata['end_line']}",
-                        'chunk_type': metadata['chunk_type'],
-                        'size_lines': metadata['size_lines'],
+                        'relevance_score': round(relevance_score, 3),
+                        'distance': distance,
+                        'filename': metadata.get('filename', 'Unknown'),
+                        'file_path': metadata.get('file_path', 'Unknown'),
+                        'language': metadata.get('language', 'Unknown'),
+                        'repo_name': metadata.get('repo_name', 'Unknown'),
+                        'lines': f"{metadata.get('start_line', 'Unknown')}-{metadata.get('end_line', 'Unknown')}",
+                        'chunk_type': metadata.get('chunk_type', 'Unknown'),
+                        'size_lines': metadata.get('size_lines', 0),
                         'content': doc,
                         'metadata': metadata,
                         'repo_context': {
@@ -183,76 +157,17 @@ class CodeRetriever:
                             'dependencies': metadata.get('repo_dependencies', [])
                         }
                     })
-            
+            formatted_results.sort(key=lambda x: x['relevance_score'], reverse=True)
             return {
                 'results': formatted_results,
                 'relevant_repositories': relevant_repos,
                 'query': query
             }
-            
         except Exception as e:
             logger.error(f"Intelligent search failed: {e}")
             return {'results': [], 'relevant_repositories': [], 'query': query}
-    
-    def get_available_languages(self) -> List[str]:
-        """Get list of available programming languages"""
-        try:
-            all_items = self.collection.get()
-            languages = {metadata.get('language', 'unknown') for metadata in all_items.get('metadatas', [])}
-            return sorted(list(languages))
-        except Exception as e:
-            logger.error(f"Failed to get languages: {e}")
-            return []
-    
-    def get_available_repositories(self) -> List[str]:
-        """Get list of available repositories"""
-        try:
-            all_items = self.collection.get()
-            repositories = {metadata.get('repo_name', 'unknown') for metadata in all_items.get('metadatas', [])}
-            return sorted(list(repositories))
-        except Exception as e:
-            logger.error(f"Failed to get repositories: {e}")
-            return []
-    
-    def get_collection_stats(self) -> Dict:
-        """Get comprehensive collection statistics"""
-        try:
-            count = self.collection.count()
-            all_items = self.collection.get()
-            
-            stats = {
-                'total_chunks': count,
-                'languages': {},
-                'repositories': {},
-                'file_types': {},
-                'chunk_types': {}
-            }
-            
-            for metadata in all_items.get('metadatas', []):
-                # Language stats
-                lang = metadata.get('language', 'unknown')
-                stats['languages'][lang] = stats['languages'].get(lang, 0) + 1
-                
-                # Repository stats
-                repo = metadata.get('repo_name', 'unknown')
-                stats['repositories'][repo] = stats['repositories'].get(repo, 0) + 1
-                
-                # File type stats (based on filename extension)
-                filename = metadata.get('filename', '')
-                if '.' in filename:
-                    ext = filename.split('.')[-1]
-                    stats['file_types'][ext] = stats['file_types'].get(ext, 0) + 1
-                
-                # Chunk type stats
-                chunk_type = metadata.get('chunk_type', 'unknown')
-                stats['chunk_types'][chunk_type] = stats['chunk_types'].get(chunk_type, 0) + 1
-            
-            return stats
-            
-        except Exception as e:
-            logger.error(f"Failed to get collection stats: {e}")
-            return {}
 
+                
 class RetrievalInterface:
     """User-friendly interface for code retrieval"""
     
