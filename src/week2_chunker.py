@@ -1,6 +1,6 @@
 # Streamlined GitHub Repository Processor with ChromaDB and LangGraph
 # Focus: ChromaDB primary storage, LangGraph workflow
-
+import torch
 import git
 import os
 import json
@@ -14,19 +14,19 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
-
+from transformers import AutoTokenizer, AutoModel
 # LangGraph imports
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 import re
 from collections import defaultdict, Counter
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 @dataclass
 class CodeChunk:
@@ -371,6 +371,11 @@ class ChromaDBManager:
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
+        self.client = chromadb.PersistentClient(path=db_path)
+        self.collection = self.client.get_or_create_collection(name="code_chunks")
+        self.tokenizer = AutoTokenizer.from_pretrained("jinaai/jina-embeddings-v2-base-code")
+        self.model = AutoModel.from_pretrained("jinaai/jina-embeddings-v2-base-code")
+
         
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(
@@ -394,6 +399,118 @@ class ChromaDBManager:
         )
         
         logger.info(f"ChromaDB initialized at {self.db_path}")
+
+    
+    
+    def chunk_to_dict(self, chunk: CodeChunk):
+        return {
+            "id": chunk.chunk_id,
+            "document": chunk.content,
+            "metadata": {
+                "file_path": chunk.file_path,
+                "filename": chunk.filename,
+                "language": chunk.language,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "chunk_type": chunk.chunk_type,
+                "size_chars": chunk.size_chars,
+                "size_lines": chunk.size_lines,
+                "created_at": chunk.created_at,
+                "repo_name": chunk.repo_name,
+            },
+        }
+
+    def add_chunk(self, chunk: CodeChunk):
+        chunk_dict = self.chunk_to_dict(chunk)
+        self.collection.add(
+            ids=[chunk_dict["id"]],
+            documents=[chunk_dict["document"]],
+            metadatas=[chunk_dict["metadata"]],
+        )
+
+    def get_chunks(self) -> List[CodeChunk]:
+        results = self.collection.get()
+        return [
+            CodeChunk(
+                chunk_id=results["ids"][i],
+                content=results["documents"][i],
+                file_path=results["metadatas"][i]["file_path"],
+                filename=results["metadatas"][i]["filename"],
+                language=results["metadatas"][i]["language"],
+                start_line=results["metadatas"][i]["start_line"],
+                end_line=results["metadatas"][i]["end_line"],
+                chunk_type=results["metadatas"][i]["chunk_type"],
+                size_chars=results["metadatas"][i]["size_chars"],
+                size_lines=results["metadatas"][i]["size_lines"],
+                created_at=results["metadatas"][i]["created_at"],
+                repo_name=results["metadatas"][i]["repo_name"],
+            )
+            for i in range(len(results["ids"]))
+        ]
+
+    def query_chunks(self, query: str, top_k: int = 5) -> List[CodeChunk]:
+        tokens = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True)
+        with torch.no_grad():
+            output = self.model(**tokens)
+            embedding = output.last_hidden_state.mean(dim=1).squeeze().tolist()
+
+        results = self.collection.query(query_embeddings=[embedding], n_results=top_k)
+
+        return [
+            CodeChunk(
+                chunk_id=results['ids'][0][i],
+                content=results['documents'][0][i],
+                file_path=results['metadatas'][0][i]['file_path'],
+                filename=results['metadatas'][0][i]['filename'],
+                language=results['metadatas'][0][i]['language'],
+                start_line=results['metadatas'][0][i]['start_line'],
+                end_line=results['metadatas'][0][i]['end_line'],
+                chunk_type=results['metadatas'][0][i]['chunk_type'],
+                size_chars=results['metadatas'][0][i]['size_chars'],
+                size_lines=results['metadatas'][0][i]['size_lines'],
+                created_at=results['metadatas'][0][i]['created_at'],
+                repo_name=results['metadatas'][0][i]['repo_name'],
+            )
+            for i in range(len(results['ids'][0]))
+        ]
+    def repository_exists(self, repo_name: str) -> bool:
+        """Check if a repository already exists in the metadata collection"""
+        try:
+            result = self.metadata_collection.get(ids=[f"repo_{repo_name}"])
+            return len(result.get('ids', [])) > 0
+        except Exception as e:
+            logger.warning(f"Error checking repository existence: {e}")
+            return False
+    def delete_repository_data(self, repo_name: str) -> bool:
+        """Delete all data for a specific repository"""
+        try:
+            # Delete repository metadata
+            try:
+                self.metadata_collection.delete(ids=[f"repo_{repo_name}"])
+                logger.info(f"Deleted metadata for repository: {repo_name}")
+            except Exception as e:
+                logger.warning(f"Could not delete metadata for {repo_name}: {e}")
+
+            # Get all chunks for this repository
+            all_chunks = self.collection.get(where={"repo_name": repo_name})
+
+            if all_chunks.get('ids'):
+                # Delete chunks in batches
+                chunk_ids = all_chunks['ids']
+                batch_size = 100
+
+                for i in range(0, len(chunk_ids), batch_size):
+                    batch_ids = chunk_ids[i:i + batch_size]
+                    self.collection.delete(ids=batch_ids)
+                    logger.info(f"Deleted batch {i // batch_size + 1} of chunks for {repo_name}")
+
+                logger.info(f"Deleted {len(chunk_ids)} chunks for repository: {repo_name}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error deleting repository data: {e}")
+            return False    
     def serialize_for_metadata(self, value: Any) -> str:
         """Convert complex data types to strings for ChromaDB metadata"""
         if isinstance(value, (list, dict)):
@@ -401,11 +518,16 @@ class ChromaDBManager:
         elif isinstance(value, (int, float, bool, str)) or value is None:
             return value
         else:
-            return str(value)
+            return str(value)    
 
     def add_repository_metadata(self, metadata: RepositoryMetadata) -> bool:
         """Add repository metadata to ChromaDB"""
         try:
+            # Check if repository already exists and delete it
+            if self.repository_exists(metadata.repo_name):
+                logger.info(f"Repository {metadata.repo_name} already exists. Overwriting...")
+                self.delete_repository_data(metadata.repo_name)
+
             # Create searchable document from metadata
             document_text = f"""
             Repository: {metadata.repo_name}
@@ -417,23 +539,24 @@ class ChromaDBManager:
             """
             raw_meta = metadata.to_dict()
             safe_meta = {
-    k: self.serialize_for_metadata(v)
-    for k, v in raw_meta.items()
-}
+                k: self.serialize_for_metadata(v)
+                for k, v in raw_meta.items()
+            }
+
             # Store metadata
             self.metadata_collection.add(
                 ids=[f"repo_{metadata.repo_name}"],
                 documents=[document_text],
                 metadatas=[safe_meta]
             )
-            
+
             logger.info(f"Added metadata for repository: {metadata.repo_name}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error adding repository metadata: {e}")
             return False
-    
+
     def add_chunks_with_metadata(self, chunks: List[CodeChunk], repo_metadata: RepositoryMetadata) -> bool:
         """Add chunks with enhanced metadata"""
         try:
@@ -552,7 +675,7 @@ class ChromaDBManager:
         except Exception as e:
             logger.error(f"Error in intelligent query: {e}")
             return {}
-    
+   
     def get_collection_stats(self) -> Dict:
         """Get collection statistics"""
         try:
@@ -578,7 +701,55 @@ class ChromaDBManager:
         except Exception as e:
             logger.error(f"Error getting collection stats: {e}")
             return {}
+    def get_all_repositories(self) -> Dict[str, Any]:
+        """Get all repositories and their metadata from ChromaDB"""
+        try:
+            # Query all documents to get repository information
+            results = self.collection.get(include=["metadatas"])
 
+            repositories = {}
+
+            if results and results['metadatas']:
+                # Process all metadata to build repository info
+                for metadata in results['metadatas']:
+                    repo_name = metadata.get('repository', 'Unknown')
+                    language = metadata.get('language', 'Unknown')
+
+                    if repo_name not in repositories:
+                        repositories[repo_name] = {
+                            'total_chunks': 0,
+                            'languages': {},
+                            'created_at': metadata.get('created_at', 'Unknown'),
+                            'url': metadata.get('repo_url', 'Unknown'),
+                            'total_files': 0,
+                            'files': set()
+                        }
+
+                    # Count chunks
+                    repositories[repo_name]['total_chunks'] += 1
+
+                    # Count languages
+                    if language in repositories[repo_name]['languages']:
+                        repositories[repo_name]['languages'][language] += 1
+                    else:
+                        repositories[repo_name]['languages'][language] = 1
+
+                    # Count unique files
+                    file_path = metadata.get('file_path', '')
+                    if file_path:
+                        repositories[repo_name]['files'].add(file_path)
+
+                # Convert file sets to counts
+                for repo_info in repositories.values():
+                    repo_info['total_files'] = len(repo_info['files'])
+                    del repo_info['files']  # Remove the set as it's not JSON serializable
+
+            logger.info(f"Found {len(repositories)} repositories in database")
+            return repositories
+
+        except Exception as e:
+            logger.error(f"Error getting repositories: {e}")
+            return {}
 # LangGraph State and Workflow
 class ProcessingState(TypedDict):
     """State for the LangGraph processing workflow"""

@@ -17,11 +17,114 @@ import git
 from urllib.parse import urlparse
 import re
 from dataclasses import asdict
+import logging
+from typing import Optional
 
 # Import the agent
 from week4_agent import GroqCodeAgent, AgentResponse
 from week2_chunker import GitHubRepoProcessor, CodeChunker, ChromaDBManager
 
+# Logger setup
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# Add helper methods to ChromaDBManager
+setattr(ChromaDBManager, "is_repository_already_stored", lambda self, repo_name: repo_name in self.get_all_repositories())
+setattr(ChromaDBManager, "get_languages_for_repo", lambda self, repo_name: self.get_all_repositories().get(repo_name, {}).get('languages', {}))
+
+# Extend GitHubRepoProcessor with safer clone method
+def clone_repository(self, repo_url: str, local_name: Optional[str] = None) -> Path:
+    """Clone a GitHub repository safely"""
+    if local_name is None:
+        local_name = repo_url.split('/')[-1].replace('.git', '')
+
+    repo_path = self.base_dir / local_name
+
+    if repo_path.exists():
+        import shutil
+        try:
+            shutil.rmtree(repo_path)
+            logger.info(f"Removed existing directory: {repo_path}")
+        except Exception as cleanup_error:
+            logger.warning(f"Could not remove existing directory {repo_path}: {cleanup_error}")
+            return repo_path  # Fallback to existing path
+
+    try:
+        logger.info(f"Cloning {repo_url} to {repo_path}")
+        git.Repo.clone_from(repo_url, repo_path, depth=1)
+        logger.info("Successfully cloned repository")
+        return repo_path
+    except Exception as e:
+        logger.error(f"Failed to clone repository: {e}")
+        raise
+
+GitHubRepoProcessor.clone_repository = clone_repository
+
+# Updated process_repository using safe clone
+
+def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
+    """Process a repository by cloning and chunking it, or load if already processed"""
+    try:
+        repo_name = extract_repo_name(repo_url)
+        chroma_manager = ChromaDBManager(settings['db_path'])
+
+        # ✅ Check if repository is already processed
+        if chroma_manager.is_repository_already_stored(repo_name):
+            progress_queue.put({
+                "status": "success",
+                "message": f"Repository '{repo_name}' already processed. Loaded from backend.",
+                "stats": {
+                    "files_processed": 0,
+                    "chunks_created": 0,
+                    "languages": chroma_manager.get_languages_for_repo(repo_name)
+                }
+            })
+            return
+
+        progress_queue.put({"status": "cloning", "message": "Cloning repository..."})
+
+        # Initialize processors
+        repo_processor = GitHubRepoProcessor(f"{settings['base_dir']}/repos")
+        chunker = CodeChunker()
+
+        # Clone and process
+        repo_path = repo_processor.clone_repository(repo_url, repo_name)
+        progress_queue.put({"status": "cloned", "message": f"Repository cloned to {repo_path}"})
+
+        progress_queue.put({"status": "processing", "message": "Processing files..."})
+        files = repo_processor.find_processable_files(repo_path)
+        all_chunks = []
+
+        for file_path in files:
+            content = repo_processor.read_file_safely(file_path)
+            if content is None:
+                continue
+            language = repo_processor.get_file_language(file_path)
+            relative_path = file_path.relative_to(repo_path)
+            chunks = chunker.chunk_by_lines(content, relative_path, language, repo_name)
+            all_chunks.extend(chunks)
+
+        progress_queue.put({"status": "chunking", "message": f"Created {len(all_chunks)} chunks"})
+        progress_queue.put({"status": "embedding", "message": "Embedding chunks..."})
+
+        repo_metadata = repo_processor.extract_metadata(repo_path, repo_name, repo_url)
+        repo_metadata.total_chunks = len(all_chunks)
+
+        chroma_manager.add_repository_metadata(repo_metadata)
+        chroma_manager.add_chunks_with_metadata(all_chunks, repo_metadata)
+
+        progress_queue.put({
+            "status": "success",
+            "message": f"Successfully processed repository! Added {len(all_chunks)} chunks.",
+            "stats": {
+                "files_processed": len(files),
+                "chunks_created": len(all_chunks),
+                "languages": repo_metadata.languages
+            }
+        })
+
+    except Exception as e:
+        progress_queue.put({"status": "error", "message": f"Error processing repository: {str(e)}"})
 # Page config
 st.set_page_config(
     page_title="🤖 Intelligent Code Assistant",
@@ -546,61 +649,6 @@ def extract_repo_name(url: str) -> str:
     if path.endswith('.git'):
         path = path[:-4]
     return path.split('/')[-1] if '/' in path else path
-
-def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
-    """Process a repository by cloning and chunking it"""
-    try:
-        progress_queue.put({"status": "cloning", "message": "Cloning repository..."})
-        
-        # Initialize processors with passed settings
-        repo_processor = GitHubRepoProcessor(f"{settings['base_dir']}/repos")
-        chunker = CodeChunker()
-        chroma_manager = ChromaDBManager(settings['db_path'])
-        
-        # Clone repository
-        repo_name = extract_repo_name(repo_url)
-        repo_path = repo_processor.clone_repository(repo_url, repo_name)
-        progress_queue.put({"status": "cloned", "message": f"Repository cloned to {repo_path}"})
-        
-        # Process files and create chunks
-        progress_queue.put({"status": "processing", "message": "Processing files..."})
-        files = repo_processor.find_processable_files(repo_path)
-        all_chunks = []
-        
-        for file_path in files:
-            content = repo_processor.read_file_safely(file_path)
-            if content is None:
-                continue
-            
-            language = repo_processor.get_file_language(file_path)
-            relative_path = file_path.relative_to(repo_path)
-            
-            chunks = chunker.chunk_by_lines(content, relative_path, language, repo_name)
-            all_chunks.extend(chunks)
-        
-        progress_queue.put({"status": "chunking", "message": f"Created {len(all_chunks)} chunks"})
-        
-        # Extract metadata and add to ChromaDB
-        progress_queue.put({"status": "embedding", "message": "Embedding chunks..."})
-        repo_metadata = repo_processor.extract_metadata(repo_path, repo_name, repo_url)
-        repo_metadata.total_chunks = len(all_chunks)
-        
-        # Add to ChromaDB
-        chroma_manager.add_repository_metadata(repo_metadata)
-        chroma_manager.add_chunks_with_metadata(all_chunks, repo_metadata)
-        
-        progress_queue.put({
-            "status": "success", 
-            "message": f"Successfully processed repository! Added {len(all_chunks)} chunks.",
-            "stats": {
-                "files_processed": len(files),
-                "chunks_created": len(all_chunks),
-                "languages": repo_metadata.languages
-            }
-        })
-        
-    except Exception as e:
-        progress_queue.put({"status": "error", "message": f"Error processing repository: {str(e)}"})
 
 
 def render_repository_manager():

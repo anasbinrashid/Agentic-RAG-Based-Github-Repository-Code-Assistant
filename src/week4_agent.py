@@ -444,7 +444,6 @@ class GroqCodeAgent:
         ]
         
         logger.info(f"Initialized GroqCodeAgent with model: {model}")
-    
     def _analyze_query_intent(self, query: str) -> Dict[str, Any]:
         """Analyze the user query to determine intent and optimal retrieval strategy"""
         
@@ -746,7 +745,28 @@ class GroqCodeAgent:
         except Exception as e:
             logger.error(f"Error in original retrieval: {e}")
             return []
-
+    def _build_repository_summary(self, chunks: List[Dict]) -> str:
+        """Build a summary of repositories represented in the chunks"""
+        repos = {}
+        languages = set()
+        
+        for chunk in chunks:
+            repo_name = chunk.get('repo_name', 'Unknown')
+            lang = chunk.get('language', 'Unknown')
+            
+            if repo_name not in repos:
+                repos[repo_name] = {'files': set(), 'languages': set()}
+            
+            repos[repo_name]['files'].add(chunk.get('filename', ''))
+            repos[repo_name]['languages'].add(lang)
+            languages.add(lang)
+        
+        summary = f"Analyzing code from {len(repos)} repositories with {len(languages)} languages: {', '.join(list(languages)[:5])}\n"
+        
+        for repo, info in list(repos.items())[:3]:  # Show top 3 repositories
+            summary += f"- {repo}: {len(info['files'])} files ({', '.join(list(info['languages'])[:3])})\n"
+        
+        return summary
     def _build_enhanced_context_prompt(self, query: str, chunks: List[Dict], 
                                      analysis: Dict, expanded_queries: List[str]) -> str:
         """Build enhanced context prompt with query expansion information"""
@@ -770,11 +790,11 @@ Note: The retrieved code chunks were found using multiple query variations to en
         
         return '\n'.join(lines)
     
-def _build_context_prompt(self, query: str, chunks: List[Dict], analysis: Dict) -> str:
-    """Build context-aware prompt for the LLM"""
-    
-    # Base system prompt for GitHub repository code assistant
-    base_system_prompt = """You are an intelligent GitHub Repository Code Assistant specializing in Java, Python, C, C++, and shell scripting. Your core capabilities include:
+    def _build_context_prompt(self, query: str, chunks: List[Dict], analysis: Dict) -> str:
+        """Build context-aware prompt for the LLM"""
+        
+        # Base system prompt for GitHub repository code assistant
+        base_system_prompt = """You are an intelligent GitHub Repository Code Assistant specializing in Java, Python, C, C++, and shell scripting. Your core capabilities include:
 
 • Deep understanding of repository structures, code patterns, and best practices
 • Expertise in analyzing, explaining, and troubleshooting code across multiple languages
@@ -790,37 +810,37 @@ Your approach:
 
 Always maintain professional tone while being approachable and helpful."""
 
-    # Intent-specific enhancements
-    intent_enhancements = {
-        'code_explanation': " Focus on breaking down complex code logic into understandable concepts, highlighting key design patterns and architectural decisions.",
-        'code_search': " Help locate relevant code examples and explain their significance within the repository context.",
-        'implementation': " Provide practical implementation guidance that follows existing codebase conventions and best practices.",
-        'debugging': " Analyze code systematically for potential issues, providing clear explanations and actionable solutions.",
-        'comparison': " Compare different approaches objectively, considering repository-specific context and constraints.",
-        'documentation': " Create clear, comprehensive explanations that would help both current and future developers.",
-        'general': " Provide comprehensive assistance while maintaining focus on repository-specific context and patterns."
-    }
-    
-    # Combine base prompt with intent-specific enhancement
-    system_prompt = base_system_prompt + intent_enhancements.get(analysis['intent'], intent_enhancements['general'])
-    
-    # Build context from retrieved chunks
-    context_sections = []
-    
-    for i, chunk in enumerate(chunks, 1):
-        # Extract key information
-        repo_name = chunk.get('repo_name', 'Unknown')
-        filename = chunk.get('filename', 'Unknown')
-        language = chunk.get('language', 'Unknown')
-        lines = chunk.get('lines', 'Unknown')
-        relevance = chunk.get('relevance_score', 0.0)
+        # Intent-specific enhancements
+        intent_enhancements = {
+            'code_explanation': " Focus on breaking down complex code logic into understandable concepts, highlighting key design patterns and architectural decisions.",
+            'code_search': " Help locate relevant code examples and explain their significance within the repository context.",
+            'implementation': " Provide practical implementation guidance that follows existing codebase conventions and best practices.",
+            'debugging': " Analyze code systematically for potential issues, providing clear explanations and actionable solutions.",
+            'comparison': " Compare different approaches objectively, considering repository-specific context and constraints.",
+            'documentation': " Create clear, comprehensive explanations that would help both current and future developers.",
+            'general': " Provide comprehensive assistance while maintaining focus on repository-specific context and patterns."
+        }
         
-        # Get repository context if available
-        repo_context = chunk.get('repo_context', {})
-        repo_langs = repo_context.get('languages', [])
-        repo_deps = repo_context.get('dependencies', [])
+        # Combine base prompt with intent-specific enhancement
+        system_prompt = base_system_prompt + intent_enhancements.get(analysis['intent'], intent_enhancements['general'])
         
-        context_section = f"""
+        # Build context from retrieved chunks
+        context_sections = []
+        
+        for i, chunk in enumerate(chunks, 1):
+            # Extract key information
+            repo_name = chunk.get('repo_name', 'Unknown')
+            filename = chunk.get('filename', 'Unknown')
+            language = chunk.get('language', 'Unknown')
+            lines = chunk.get('lines', 'Unknown')
+            relevance = chunk.get('relevance_score', 0.0)
+            
+            # Get repository context if available
+            repo_context = chunk.get('repo_context', {})
+            repo_langs = repo_context.get('languages', [])
+            repo_deps = repo_context.get('dependencies', [])
+            
+            context_section = f"""
 CODE CHUNK {i}:
 Repository: {repo_name}
 File: {filename}
@@ -830,22 +850,23 @@ Relevance Score: {relevance:.3f}
 Repository Languages: {', '.join(repo_langs[:3])}
 Dependencies: {', '.join(repo_deps[:3])}
 
-{language}
+```{language}
 {chunk.get('content', '')}
+```
 
 """
-        context_sections.append(context_section)
-    
-    # Build repository summary
-    repo_summary = self._build_repository_summary(chunks)
-    
-    # Build final prompt
-    prompt = f"""{system_prompt}
+            context_sections.append(context_section)
+        
+        # Build repository summary
+        repo_summary = self._build_repository_summary(chunks)
+        
+        # Build final prompt
+        prompt = f"""{system_prompt}
 
 REPOSITORY CONTEXT:
 {repo_summary}
 
-RELEVANT CODE CHUNKS:
+CONTEXT INFORMATION:
 {''.join(context_sections)}
 
 USER QUERY: {query}
@@ -860,32 +881,8 @@ RESPONSE GUIDELINES:
 7. Maintain focus on accuracy and actionable insights
 
 Provide your response now:"""
-    
-    return prompt
-    
-    def _calculate_confidence(self, query: str, chunks: List[Dict], response: str) -> float:
-        """Calculate confidence score based on various factors"""
         
-        # Base confidence factors
-        factors = {
-            'relevance_scores': sum(chunk.get('relevance_score', 0) for chunk in chunks) / len(chunks) if chunks else 0,
-            'chunk_count': min(len(chunks) / 5, 1.0),  # Normalized by expected count
-            'response_length': min(len(response) / 500, 1.0),  # Longer responses often more comprehensive
-            'code_references': len(re.findall(r'Code Chunk \d+', response)) / len(chunks) if chunks else 0,
-            'query_complexity': 0.8 if len(query.split()) > 10 else 0.6
-        }
-        
-        # Weight the factors
-        weights = {
-            'relevance_scores': 0.4,
-            'chunk_count': 0.2,
-            'response_length': 0.1,
-            'code_references': 0.2,
-            'query_complexity': 0.1
-        }
-        
-        confidence = sum(factors[key] * weights[key] for key in factors)
-        return min(confidence, 1.0)
+        return prompt
     
     def _extract_reasoning(self, response: str) -> str:
         """Extract reasoning from the response"""
@@ -914,7 +911,135 @@ Provide your response now:"""
                 return sentence
         
         return "Based on analysis of the retrieved code chunks"
-    
+    def _calculate_confidence(self, query: str, chunks: List[Dict], response: str) -> float:
+        """Calculate confidence score based on various factors"""
+        
+        # Base confidence factors
+        factors = {
+            'relevance_scores': sum(chunk.get('relevance_score', 0) for chunk in chunks) / len(chunks) if chunks else 0,
+            'chunk_count': min(len(chunks) / 5, 1.0),  # Normalized by expected count
+            'response_length': min(len(response) / 500, 1.0),  # Longer responses often more comprehensive
+            'code_references': len(re.findall(r'Code Chunk \d+', response)) / len(chunks) if chunks else 0,
+            'query_complexity': 0.8 if len(query.split()) > 10 else 0.6
+        }
+        
+        # Weight the factors
+        weights = {
+            'relevance_scores': 0.4,
+            'chunk_count': 0.2,
+            'response_length': 0.1,
+            'code_references': 0.2,
+            'query_complexity': 0.1
+        }
+        
+        confidence = sum(factors[key] * weights[key] for key in factors)
+        return min(confidence, 1.0)
+    def get_stats(self) -> Dict[str, Any]:
+        """Get comprehensive statistics about the knowledge base"""
+        
+        try:
+            # Get all repositories and their metadata
+            all_repositories = self.retriever.chroma_manager.get_all_repositories()
+            
+            # Initialize stats structure
+            stats = {
+                'total_chunks': 0,
+                'repositories': {},
+                'languages': {},
+                'total_repositories': 0,
+                'average_chunks_per_repo': 0,
+                'repository_details': {}
+            }
+            
+            # Process each repository
+            for repo_name, repo_info in all_repositories.items():
+                chunk_count = repo_info.get('total_chunks', 0)
+                languages = repo_info.get('languages', {})
+                
+                # Add to repositories stats
+                stats['repositories'][repo_name] = chunk_count
+                stats['total_chunks'] += chunk_count
+                
+                # Add language information
+                for language, count in languages.items():
+                    if language in stats['languages']:
+                        stats['languages'][language] += count
+                    else:
+                        stats['languages'][language] = count
+                
+                # Detailed repository information
+                stats['repository_details'][repo_name] = {
+                    'chunks': chunk_count,
+                    'languages': languages,
+                    'created_at': repo_info.get('created_at', 'Unknown'),
+                    'url': repo_info.get('url', 'Unknown'),
+                    'total_files': repo_info.get('total_files', 0)
+                }
+            
+            # Calculate derived stats
+            stats['total_repositories'] = len(all_repositories)
+            if stats['total_repositories'] > 0:
+                stats['average_chunks_per_repo'] = stats['total_chunks'] / stats['total_repositories']
+            
+            # Get additional ChromaDB stats if available
+            try:
+                collection = self.retriever.chroma_manager.collection
+                collection_count = collection.count()
+                
+                # Verify consistency
+                if collection_count != stats['total_chunks']:
+                    logger.warning(f"Chunk count mismatch: metadata={stats['total_chunks']}, collection={collection_count}")
+                    stats['total_chunks'] = collection_count  # Use actual collection count
+                    
+            except Exception as e:
+                logger.warning(f"Could not get collection stats: {e}")
+            
+            # Add performance metrics if available
+            if hasattr(self, 'query_expander') and hasattr(self.query_expander, 'logger'):
+                try:
+                    expansion_stats = self.query_expander.logger.get_session_stats()
+                    stats['query_expansion'] = expansion_stats
+                except Exception as e:
+                    logger.debug(f"Could not get expansion stats: {e}")
+            
+            logger.info(f"Generated stats: {stats['total_repositories']} repos, {stats['total_chunks']} chunks")
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error generating stats: {e}")
+            # Return empty stats structure on error
+            return {
+                'total_chunks': 0,
+                'repositories': {},
+                'languages': {},
+                'total_repositories': 0,
+                'average_chunks_per_repo': 0,
+                'repository_details': {},
+                'error': str(e)
+            }
+    def _call_groq_api(self, prompt: str) -> Tuple[str, Dict]:
+        """Call the Groq API with the prompt"""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2000,
+                temperature=0.3,
+                top_p=0.9
+            )
+            
+            content = response.choices[0].message.content
+            usage_info = {
+                'prompt_tokens': response.usage.prompt_tokens if hasattr(response, 'usage') else 0,
+                'completion_tokens': response.usage.completion_tokens if hasattr(response, 'usage') else 0,
+                'total_tokens': response.usage.total_tokens if hasattr(response, 'usage') else 0
+            }
+            
+            return content, usage_info
+            
+        except Exception as e:
+            logger.error(f"Error calling Groq API: {e}")
+            return f"I encountered an error while processing your request: {str(e)}", {}     
     def query(self, query: str) -> AgentResponse:
         """Process a user query and return a comprehensive response"""
         
@@ -953,8 +1078,8 @@ Provide your response now:"""
                     model_used=self.model
                 )
             
-            # Step 4: Build enhanced context-aware prompt
-            prompt = self._build_enhanced_context_prompt(query, chunks, analysis, expanded_queries)
+            # Step 4: Build context-aware prompt
+            prompt = self._build_context_prompt(query, chunks, analysis)
             
             # Step 5: Call Groq API
             response_content, usage_info = self._call_groq_api(prompt)
@@ -999,7 +1124,7 @@ Provide your response now:"""
                 response_time=0.0,
                 model_used=self.model
             )
-
+    
 class InteractiveCodeAgent:
     """Interactive interface for the code agent"""
     
