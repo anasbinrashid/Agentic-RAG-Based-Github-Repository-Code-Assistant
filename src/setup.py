@@ -41,7 +41,7 @@ class ProjectSetup:
         
         if not env_file.exists():
             env_content = """# Groq API Configuration
-GROQ_API_KEY=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
+GROQ_API_KEY=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
 GROQ_BASE_URL=https://api.groq.com
 
 # Default Models

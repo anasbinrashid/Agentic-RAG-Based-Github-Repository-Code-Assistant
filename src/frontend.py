@@ -126,7 +126,6 @@ def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
 # Page config
 st.set_page_config(
     page_title="🤖 Intelligent Code Assistant",
-    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={

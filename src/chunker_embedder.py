@@ -307,11 +307,6 @@ class ChromaDBManager:
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
-        self.client = chromadb.PersistentClient(path=db_path)
-        self.collection = self.client.get_or_create_collection(name="code_chunks")
-        self.tokenizer = AutoTokenizer.from_pretrained("jinaai/jina-embeddings-v2-base-code")
-        self.model = AutoModel.from_pretrained("jinaai/jina-embeddings-v2-base-code")
-
         
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(
@@ -324,20 +319,104 @@ class ChromaDBManager:
             model_name="jinaai/jina-embeddings-v2-base-code"
         )
         
-        # Get or create collections
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection_name,
-            embedding_function=self.embedding_function
-        )
-        self.metadata_collection = self.client.get_or_create_collection(
-            name=f"{collection_name}_metadata",
-            embedding_function=self.embedding_function
-        )
+        # Handle existing collections with different embedding functions
+        try:
+            # Try to get existing collection
+            existing_collections = self.client.list_collections()
+            collection_exists = any(col.name == self.collection_name for col in existing_collections)
+            metadata_collection_exists = any(col.name == f"{collection_name}_metadata" for col in existing_collections)
+            
+            if collection_exists:
+                # Check if we can get the collection with our embedding function
+                try:
+                    self.collection = self.client.get_collection(
+                        name=self.collection_name,
+                        embedding_function=self.embedding_function
+                    )
+                    logger.info(f"Using existing collection: {self.collection_name}")
+                except ValueError as e:
+                    if "embedding function conflict" in str(e).lower():
+                        logger.warning(f"Embedding function conflict detected. Deleting existing collection: {self.collection_name}")
+                        self.client.delete_collection(name=self.collection_name)
+                        self.collection = self.client.create_collection(
+                            name=self.collection_name,
+                            embedding_function=self.embedding_function
+                        )
+                        logger.info(f"Created new collection with correct embedding function: {self.collection_name}")
+                    else:
+                        raise e
+            else:
+                # Create new collection
+                self.collection = self.client.create_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_function
+                )
+                logger.info(f"Created new collection: {self.collection_name}")
+            
+            # Handle metadata collection similarly
+            if metadata_collection_exists:
+                try:
+                    self.metadata_collection = self.client.get_collection(
+                        name=f"{collection_name}_metadata",
+                        embedding_function=self.embedding_function
+                    )
+                    logger.info(f"Using existing metadata collection: {collection_name}_metadata")
+                except ValueError as e:
+                    if "embedding function conflict" in str(e).lower():
+                        logger.warning(f"Embedding function conflict detected. Deleting existing metadata collection")
+                        self.client.delete_collection(name=f"{collection_name}_metadata")
+                        self.metadata_collection = self.client.create_collection(
+                            name=f"{collection_name}_metadata",
+                            embedding_function=self.embedding_function
+                        )
+                        logger.info(f"Created new metadata collection with correct embedding function")
+                    else:
+                        raise e
+            else:
+                self.metadata_collection = self.client.create_collection(
+                    name=f"{collection_name}_metadata",
+                    embedding_function=self.embedding_function
+                )
+                logger.info(f"Created new metadata collection: {collection_name}_metadata")
+                
+        except Exception as e:
+            logger.error(f"Error initializing ChromaDB collections: {e}")
+            # Fallback: delete all collections and start fresh
+            try:
+                logger.warning("Attempting to reset all collections...")
+                existing_collections = self.client.list_collections()
+                for col in existing_collections:
+                    if col.name.startswith(collection_name):
+                        self.client.delete_collection(name=col.name)
+                        logger.info(f"Deleted collection: {col.name}")
+                
+                # Create fresh collections
+                self.collection = self.client.create_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_function
+                )
+                self.metadata_collection = self.client.create_collection(
+                    name=f"{collection_name}_metadata",
+                    embedding_function=self.embedding_function
+                )
+                logger.info("Successfully created fresh collections")
+                
+            except Exception as reset_error:
+                logger.error(f"Failed to reset collections: {reset_error}")
+                raise reset_error
+        
+        # Initialize tokenizer and model for manual embeddings if needed
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained("jinaai/jina-embeddings-v2-base-code")
+            self.model = AutoModel.from_pretrained("jinaai/jina-embeddings-v2-base-code")
+            logger.info("Initialized tokenizer and model for manual embeddings")
+        except Exception as e:
+            logger.warning(f"Could not initialize manual embedding components: {e}")
+            self.tokenizer = None
+            self.model = None
         
         logger.info(f"ChromaDB initialized at {self.db_path}")
 
-    
-    
     def chunk_to_dict(self, chunk: CodeChunk):
         return {
             "id": chunk.chunk_id,
@@ -385,30 +464,62 @@ class ChromaDBManager:
         ]
 
     def query_chunks(self, query: str, top_k: int = 5) -> List[CodeChunk]:
-        tokens = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True)
-        with torch.no_grad():
-            output = self.model(**tokens)
-            embedding = output.last_hidden_state.mean(dim=1).squeeze().tolist()
+        # Use ChromaDB's built-in query instead of manual embeddings
+        try:
+            results = self.collection.query(query_texts=[query], n_results=top_k)
+            
+            return [
+                CodeChunk(
+                    chunk_id=results['ids'][0][i],
+                    content=results['documents'][0][i],
+                    file_path=results['metadatas'][0][i]['file_path'],
+                    filename=results['metadatas'][0][i]['filename'],
+                    language=results['metadatas'][0][i]['language'],
+                    start_line=results['metadatas'][0][i]['start_line'],
+                    end_line=results['metadatas'][0][i]['end_line'],
+                    chunk_type=results['metadatas'][0][i]['chunk_type'],
+                    size_chars=results['metadatas'][0][i]['size_chars'],
+                    size_lines=results['metadatas'][0][i]['size_lines'],
+                    created_at=results['metadatas'][0][i]['created_at'],
+                    repo_name=results['metadatas'][0][i]['repo_name'],
+                )
+                for i in range(len(results['ids'][0]))
+            ]
+        except Exception as e:
+            logger.error(f"Error querying chunks: {e}")
+            # Fallback to manual embedding if available
+            if self.tokenizer and self.model:
+                try:
+                    tokens = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True)
+                    with torch.no_grad():
+                        output = self.model(**tokens)
+                        embedding = output.last_hidden_state.mean(dim=1).squeeze().tolist()
 
-        results = self.collection.query(query_embeddings=[embedding], n_results=top_k)
+                    results = self.collection.query(query_embeddings=[embedding], n_results=top_k)
 
-        return [
-            CodeChunk(
-                chunk_id=results['ids'][0][i],
-                content=results['documents'][0][i],
-                file_path=results['metadatas'][0][i]['file_path'],
-                filename=results['metadatas'][0][i]['filename'],
-                language=results['metadatas'][0][i]['language'],
-                start_line=results['metadatas'][0][i]['start_line'],
-                end_line=results['metadatas'][0][i]['end_line'],
-                chunk_type=results['metadatas'][0][i]['chunk_type'],
-                size_chars=results['metadatas'][0][i]['size_chars'],
-                size_lines=results['metadatas'][0][i]['size_lines'],
-                created_at=results['metadatas'][0][i]['created_at'],
-                repo_name=results['metadatas'][0][i]['repo_name'],
-            )
-            for i in range(len(results['ids'][0]))
-        ]
+                    return [
+                        CodeChunk(
+                            chunk_id=results['ids'][0][i],
+                            content=results['documents'][0][i],
+                            file_path=results['metadatas'][0][i]['file_path'],
+                            filename=results['metadatas'][0][i]['filename'],
+                            language=results['metadatas'][0][i]['language'],
+                            start_line=results['metadatas'][0][i]['start_line'],
+                            end_line=results['metadatas'][0][i]['end_line'],
+                            chunk_type=results['metadatas'][0][i]['chunk_type'],
+                            size_chars=results['metadatas'][0][i]['size_chars'],
+                            size_lines=results['metadatas'][0][i]['size_lines'],
+                            created_at=results['metadatas'][0][i]['created_at'],
+                            repo_name=results['metadatas'][0][i]['repo_name'],
+                        )
+                        for i in range(len(results['ids'][0]))
+                    ]
+                except Exception as manual_error:
+                    logger.error(f"Manual embedding query also failed: {manual_error}")
+                    return []
+            else:
+                return []
+    
     def repository_exists(self, repo_name: str) -> bool:
         """Check if a repository already exists in the metadata collection"""
         try:
@@ -417,6 +528,7 @@ class ChromaDBManager:
         except Exception as e:
             logger.warning(f"Error checking repository existence: {e}")
             return False
+    
     def delete_repository_data(self, repo_name: str) -> bool:
         """Delete all data for a specific repository"""
         try:
@@ -447,6 +559,7 @@ class ChromaDBManager:
         except Exception as e:
             logger.error(f"Error deleting repository data: {e}")
             return False    
+    
     def serialize_for_metadata(self, value: Any) -> str:
         """Convert complex data types to strings for ChromaDB metadata"""
         if isinstance(value, (list, dict)):
@@ -516,27 +629,26 @@ class ChromaDBManager:
                 
                 # Enhanced metadata
                 raw_metadata = {
-                        "filename": chunk.filename,
-                        "file_path": chunk.file_path,
-                        "start_line": chunk.start_line,
-    "end_line": chunk.end_line,
-    "language": chunk.language,
-    "chunk_type": chunk.chunk_type,
-    "size_chars": chunk.size_chars,
-    "size_lines": chunk.size_lines,
-    "created_at": chunk.created_at,
-    "repo_name": chunk.repo_name,
-    "repo_primary_language": repo_metadata.primary_language,
-    "repo_description": repo_metadata.description,
-    "repo_total_files": repo_metadata.total_files,
-    "repo_languages": list(repo_metadata.languages.keys()),
-    "repo_dependencies": repo_metadata.dependencies.get(chunk.language, [])
-            
+                    "filename": chunk.filename,
+                    "file_path": chunk.file_path,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "language": chunk.language,
+                    "chunk_type": chunk.chunk_type,
+                    "size_chars": chunk.size_chars,
+                    "size_lines": chunk.size_lines,
+                    "created_at": chunk.created_at,
+                    "repo_name": chunk.repo_name,
+                    "repo_primary_language": repo_metadata.primary_language,
+                    "repo_description": repo_metadata.description,
+                    "repo_total_files": repo_metadata.total_files,
+                    "repo_languages": list(repo_metadata.languages.keys()),
+                    "repo_dependencies": repo_metadata.dependencies.get(chunk.language, [])
                 }
                 safe_metadata = {
-    k: self.serialize_for_metadata(v)
-    for k, v in raw_metadata.items()
-}
+                    k: self.serialize_for_metadata(v)
+                    for k, v in raw_metadata.items()
+                }
                 metadatas.append(safe_metadata)
                 
             
@@ -637,6 +749,7 @@ class ChromaDBManager:
         except Exception as e:
             logger.error(f"Error getting collection stats: {e}")
             return {}
+    
     def get_all_repositories(self) -> Dict[str, Any]:
         """Get all repositories and their metadata from ChromaDB"""
         try:
