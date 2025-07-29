@@ -1,4 +1,4 @@
-# Week 4 Agent - Intelligent Code Assistant with Groq API and Llama
+# Intelligent Code Assistant with Groq API and Llama
 # Focus: RAG-based code assistant using stored chunk metadata for accurate retrieval
 
 import os
@@ -15,7 +15,7 @@ from groq import Groq
 from dotenv import load_dotenv
 
 # Import our retrieval system
-from week3_retrieval import CodeRetriever, RetrievalInterface
+from retrieval import CodeRetriever, RetrievalInterface
 
 # Load environment variables
 load_dotenv()
@@ -1135,7 +1135,7 @@ class InteractiveCodeAgent:
     def start_interactive_session(self):
         """Start an interactive session with the agent"""
         
-        print("🤖 Intelligent Code Assistant (Powered by Groq + Llama)")
+        print("Intelligent Code Assistant (Powered by Groq + Llama)")
         print("=" * 60)
         print("Ask me anything about your codebase! Type 'help' for commands or 'quit' to exit.")
         print()
@@ -1185,17 +1185,17 @@ class InteractiveCodeAgent:
                 print("\n\nGoodbye! 👋")
                 break
             except Exception as e:
-                print(f"\n❌ Error: {e}")
+                print(f"\nError: {e}")
     
     def _show_help(self):
         """Show help information"""
-        print("\n📚 Available Commands:")
+        print("\nAvailable Commands:")
         print("  help     - Show this help message")
         print("  stats    - Show collection statistics")
         print("  history  - Show conversation history")
         print("  model <name> - Change the model (llama3-8b-8192, llama3-70b-8192, etc.)")
         print("  quit     - Exit the assistant")
-        print("\n💡 Query Examples:")
+        print("\nQuery Examples:")
         print("  'Explain how authentication works in this codebase'")
         print("  'Find examples of error handling in Python'")
         print("  'How to implement a REST API in this project?'")
@@ -1206,7 +1206,7 @@ class InteractiveCodeAgent:
         """Show collection statistics"""
         stats = self.agent.retriever.get_collection_stats()
         
-        print("\n📊 Codebase Statistics:")
+        print("\nCodebase Statistics:")
         print(f"  Total chunks: {stats.get('total_chunks', 0)}")
         print(f"  Languages: {len(stats.get('languages', {}))}")
         print(f"  Repositories: {len(stats.get('repositories', {}))}")
@@ -1224,7 +1224,7 @@ class InteractiveCodeAgent:
             print("No conversation history yet.")
             return
         
-        print(f"\n📝 Conversation History ({len(self.conversation_history)} queries):")
+        print(f"\nConversation History ({len(self.conversation_history)} queries):")
         for i, item in enumerate(self.conversation_history[-5:], 1):  # Show last 5
             print(f"{i}. {item['query']}")
             print(f"   Confidence: {item['response'].confidence:.2f}")
@@ -1236,30 +1236,30 @@ class InteractiveCodeAgent:
         
         if model_name in self.agent.available_models:
             self.agent.model = model_name
-            print(f"✅ Model changed to: {model_name}")
+            print(f"Model changed to: {model_name}")
         else:
-            print(f"❌ Invalid model. Available models: {', '.join(self.agent.available_models)}")
+            print(f"Invalid model. Available models: {', '.join(self.agent.available_models)}")
     
     def _display_response(self, response: AgentResponse):
         """Display the agent response in a formatted way"""
         print("\n" + "=" * 80)
-        print(f"🤖 Assistant Response")
+        print(f"Assistant Response")
         print("=" * 80)
         
-        print(f"\n📝 Answer:")
+        print(f"\nAnswer:")
         print(response.answer)
         
-        print(f"\n📊 Response Details:")
+        print(f"\nResponse Details:")
         print(f"  Confidence: {response.confidence:.2f}")
         print(f"  Response Time: {response.response_time:.2f}s")
         print(f"  Model Used: {response.model_used}")
         print(f"  Sources Used: {len(response.sources)}")
         
         if response.reasoning:
-            print(f"\n🧠 Reasoning: {response.reasoning}")
+            print(f"\nReasoning: {response.reasoning}")
         
         if response.sources:
-            print(f"\n📚 Sources:")
+            print(f"\nSources:")
             for i, source in enumerate(response.sources, 1):
                 print(f"  {i}. {source['filename']} ({source['language']})")
                 print(f"     Repository: {source['repository']}")
@@ -1286,7 +1286,7 @@ def main():
     
     # Check for GROQ_API_KEY
     if not os.getenv("GROQ_API_KEY"):
-        print("❌ Error: GROQ_API_KEY environment variable is required")
+        print("Error: GROQ_API_KEY environment variable is required")
         print("Please set it in your .env file or environment")
         return
     
@@ -1298,25 +1298,25 @@ def main():
         else:
             # Process single query
             agent = GroqCodeAgent(args.db_path, args.model)
-            print(f"🔄 Processing query: {args.query}")
+            print(f"Processing query: {args.query}")
             
             response = agent.query(args.query)
             
             # Display response
             print("\n" + "=" * 80)
-            print(f"🤖 Assistant Response")
+            print(f"Assistant Response")
             print("=" * 80)
-            print(f"\n📝 Answer:")
+            print(f"\nAnswer:")
             print(response.answer)
             
-            print(f"\n📊 Response Details:")
+            print(f"\nResponse Details:")
             print(f"  Confidence: {response.confidence:.2f}")
             print(f"  Response Time: {response.response_time:.2f}s")
             print(f"  Model Used: {response.model_used}")
             print(f"  Sources Used: {len(response.sources)}")
             
             if response.sources:
-                print(f"\n📚 Sources:")
+                print(f"\nSources:")
                 for i, source in enumerate(response.sources, 1):
                     print(f"  {i}. {source['filename']} ({source['language']})")
                     print(f"     Repository: {source['repository']}")
@@ -1326,10 +1326,10 @@ def main():
             if args.output:
                 with open(args.output, 'w') as f:
                     json.dump(asdict(response), f, indent=2)
-                print(f"\n💾 Response saved to: {args.output}")
+                print(f"\nResponse saved to: {args.output}")
             
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         print("Make sure you have:")
         print("1. Set GROQ_API_KEY in your environment")
         print("2. Processed repositories using week2_chunker.py")

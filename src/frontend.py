@@ -1,4 +1,4 @@
-# Week 5 Frontend - Streamlit Interface for Intelligent Code Assistant
+# Streamlit Interface for Intelligent Code Assistant
 # Modern web interface for the Groq-powered RAG code assistant
 
 import streamlit as st
@@ -9,10 +9,8 @@ from datetime import datetime
 from pathlib import Path
 import plotly.express as px
 import pandas as pd
-import subprocess
 import threading
 from queue import Queue
-import tempfile
 import git
 from urllib.parse import urlparse
 import re
@@ -21,8 +19,8 @@ import logging
 from typing import Optional
 
 # Import the agent
-from week4_agent import GroqCodeAgent, AgentResponse
-from week2_chunker import GitHubRepoProcessor, CodeChunker, ChromaDBManager
+from agent import GroqCodeAgent, AgentResponse
+from chunker_embedder import GitHubRepoProcessor, CodeChunker, ChromaDBManager
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -68,7 +66,7 @@ def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
         repo_name = extract_repo_name(repo_url)
         chroma_manager = ChromaDBManager(settings['db_path'])
 
-        # ✅ Check if repository is already processed
+        # Check if repository is already processed
         if chroma_manager.is_repository_already_stored(repo_name):
             progress_queue.put({
                 "status": "success",

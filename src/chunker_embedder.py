@@ -1,8 +1,8 @@
 # Streamlined GitHub Repository Processor with ChromaDB and LangGraph
 # Focus: ChromaDB primary storage, LangGraph workflow
+
 import torch
 import git
-import os
 import json
 import hashlib
 from pathlib import Path
@@ -15,18 +15,16 @@ from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModel
-# LangGraph imports
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 import re
 from collections import defaultdict, Counter
-# Set up logging
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-
 
 @dataclass
 class CodeChunk:
@@ -76,28 +74,10 @@ class GitHubRepoProcessor:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         
         # Supported file extensions
-        self.supported_extensions = {
-            '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
-            '.jsx': 'javascript', '.tsx': 'typescript', '.java': 'java',
-            '.cpp': 'cpp', '.c': 'c', '.h': 'c', '.hpp': 'cpp',
-            '.cs': 'csharp', '.go': 'go', '.rs': 'rust', '.php': 'php',
-            '.rb': 'ruby', '.xml': 'xml', '.html': 'html', '.css': 'css',
-            '.sql': 'sql', '.sh': 'bash', '.dockerfile': 'dockerfile', '.json': 'json',
-            '.md': 'markdown', '.txt': 'text', '.yaml': 'yaml',
-            '.yml': 'yaml', '.kt': 'kotlin',
-            '.swift': 'swift', '.scala': 'scala',
-            '.lua': 'lua', '.pl': 'perl',
-            '.m': 'objective-c',
-            '.dart': 'dart' ,          
-            '.asm': 'assembly'
-        }
+        self.supported_extensions = {'.py': 'python', '.js': 'javascript', '.ts': 'typescript', '.jsx': 'javascript', '.tsx': 'typescript', '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.h': 'c', '.hpp': 'cpp', '.cs': 'csharp', '.go': 'go', '.rs': 'rust', '.php': 'php', '.rb': 'ruby', '.xml': 'xml', '.html': 'html', '.css': 'css', '.sql': 'sql', '.sh': 'bash', '.dockerfile': 'dockerfile', '.json': 'json', '.md': 'markdown', '.txt': 'text', '.yaml': 'yaml', '.yml': 'yaml', '.kt': 'kotlin', '.swift': 'swift', '.scala': 'scala', '.pl': 'perl', '.m': 'objective-c', '.dart': 'dart' , '.asm': 'assembly'}
         
         # Directories to skip
-        self.skip_dirs = {
-            '.git', 'node_modules', '__pycache__', '.pytest_cache',
-            'venv', 'env', '.venv', 'build', 'dist', 'target',
-            '.idea', '.vscode', 'coverage', '.next', 'vendor', 'docs'
-        }
+        self.skip_dirs = {'.git', 'node_modules', '__pycache__', '.pytest_cache','venv', 'env', '.venv', 'build', 'dist', 'target','.idea', '.vscode', 'coverage', '.next', 'vendor', 'docs'}
     
     def clone_repository(self, repo_url: str, local_name: Optional[str] = None) -> Path:
         """Clone a GitHub repository"""
@@ -197,14 +177,7 @@ class GitHubRepoProcessor:
         git_info = {}
         try:
             repo = git.Repo(repo_path)
-            git_info = {
-                'branch': repo.active_branch.name,
-                'commit_hash': repo.head.commit.hexsha,
-                'commit_message': repo.head.commit.message.strip(),
-                'author': str(repo.head.commit.author),
-                'commit_date': repo.head.commit.committed_datetime.isoformat(),
-                'remote_url': next(iter(repo.remotes.origin.urls), 'unknown')
-            }
+            git_info = {'branch': repo.active_branch.name,'commit_hash': repo.head.commit.hexsha,'commit_message': repo.head.commit.message.strip(),'author': str(repo.head.commit.author),'commit_date': repo.head.commit.committed_datetime.isoformat(), 'remote_url': next(iter(repo.remotes.origin.urls), 'unknown')}
         except Exception as e:
             logger.warning(f"Could not extract git info: {e}")
             git_info = {'error': str(e)}
@@ -265,31 +238,8 @@ class GitHubRepoProcessor:
                 deps = re.findall(r'<artifactId>(.*?)</artifactId>', content)
                 dependencies['java'].extend(deps)
         
-        # Go dependencies
-        go_mod = repo_path / 'go.mod'
-        if go_mod.exists():
-            content = self.read_file_safely(go_mod)
-            if content:
-                deps = re.findall(r'require\s+([^\s]+)', content)
-                dependencies['go'].extend(deps)
-        
         # Create metadata object
-        metadata = RepositoryMetadata(
-            repo_name=repo_name,
-            repo_url=repo_url,
-            clone_path=str(repo_path),
-            description=readme_content[:500] if readme_content else "",
-            primary_language=primary_language,
-            languages=dict(languages),
-            total_files=len(files),
-            total_lines=total_lines,
-            total_chunks=0,  # Will be updated after chunking
-            dependencies=dict(dependencies),
-            readme_content=readme_content,
-            license_info=license_info,
-            git_info=git_info,
-            created_at=datetime.now().isoformat()
-        )
+        metadata = RepositoryMetadata(repo_name=repo_name, repo_url=repo_url, clone_path=str(repo_path), description=readme_content[:500] if readme_content else "", primary_language=primary_language, languages=dict(languages), total_files=len(files), total_lines=total_lines, total_chunks=0, dependencies=dict(dependencies), readme_content=readme_content, license_info=license_info, git_info=git_info, created_at=datetime.now().isoformat())
         
         return metadata
 
@@ -313,20 +263,7 @@ class CodeChunker:
         if len(lines) <= self.chunk_size:
             # Small file - single chunk
             chunk_id = self.create_chunk_id(str(file_path), 1, len(lines), repo_name)
-            chunk = CodeChunk(
-                chunk_id=chunk_id,
-                filename=file_path.name,
-                file_path=str(file_path),
-                content=content,
-                start_line=1,
-                end_line=len(lines),
-                language=language,
-                chunk_type='complete_file',
-                size_chars=len(content),
-                size_lines=len(lines),
-                created_at=datetime.now().isoformat(),
-                repo_name=repo_name
-            )
+            chunk = CodeChunk(chunk_id=chunk_id, filename=file_path.name, file_path=str(file_path), content=content, start_line=1, end_line=len(lines), language=language, chunk_type='complete_file', size_chars=len(content), size_lines=len(lines), created_at=datetime.now().isoformat(), repo_name=repo_name)
             chunks.append(chunk)
         else:
             # Split into overlapping chunks
@@ -350,8 +287,7 @@ class CodeChunker:
                     chunk_type=f'chunk_{chunk_num}',
                     size_chars=len(chunk_content),
                     size_lines=len(chunk_lines),
-                    created_at=datetime.now().isoformat(),
-                    repo_name=repo_name
+                    created_at=datetime.now().isoformat(), repo_name=repo_name
                 )
                 chunks.append(chunk)
                 

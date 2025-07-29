@@ -1,4 +1,4 @@
-# Week 3 Retrieval System - Code Chunk Retrieval with ChromaDB
+# Code Chunk Retrieval with ChromaDB
 # Focus: Simple, clean retrieval interface for code chunks
 
 import os
@@ -207,7 +207,7 @@ class RetrievalInterface:
             elif choice == '7':
                 self._show_stats()
             elif choice == '8':
-                print("Goodbye! 👋")
+                print("Goodbye!")
                 break
             else:
                 print("Invalid choice. Please try again.")
@@ -313,7 +313,7 @@ class RetrievalInterface:
         """Show collection statistics"""
         stats = self.retriever.get_collection_stats()
         
-        print("\n📊 Collection Statistics")
+        print("\nCollection Statistics")
         print("=" * 30)
         print(f"Total chunks: {stats.get('total_chunks', 0)}")
         
@@ -332,12 +332,12 @@ class RetrievalInterface:
     def _display_results(self, results: List[Dict], query: str, filter_info: str = ""):
         """Display search results in a formatted way"""
         if not results:
-            print(f"\n❌ No results found for query: '{query}'")
+            print(f"\nNo results found for query: '{query}'")
             if filter_info:
                 print(f"Filter: {filter_info}")
             return
         
-        print(f"\n✅ Found {len(results)} results for query: '{query}'")
+        print(f"\nFound {len(results)} results for query: '{query}'")
         if filter_info:
             print(f"Filter: {filter_info}")
         print("=" * 60)
@@ -365,10 +365,10 @@ class RetrievalInterface:
     def _display_intelligent_results(self, results: List[Dict], query: str):
         """Display intelligent search results with repository context"""
         if not results:
-            print(f"\n❌ No results found for query: '{query}'")
+            print(f"\nNo results found for query: '{query}'")
             return
         
-        print(f"\n✅ Found {len(results)} results for query: '{query}'")
+        print(f"\nFound {len(results)} results for query: '{query}'")
         print("=" * 80)
         
         for result in results:
@@ -394,7 +394,7 @@ class RetrievalInterface:
     
     def _show_full_content(self, result: Dict):
         """Show full content of a specific result"""
-        print(f"\n📄 Full content - {result['filename']}")
+        print(f"\nFull content - {result['filename']}")
         print("=" * 60)
         print(f"Repository: {result['repo_name']}")
         print(f"Language: {result['language']}")
@@ -455,7 +455,7 @@ def main():
             print("Use --query to search, --interactive for interactive mode, or --help for options")
             
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         print("Make sure you have processed some repositories first using week2_chunker.py")
 
 if __name__ == "__main__":

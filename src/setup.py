@@ -1,14 +1,11 @@
-# Week 1: Foundation Setup with Groq API Integration
+# Foundation Setup with Groq API Integration
 # This file contains all the setup scripts and basic tests for Groq-based architecture
 
 import subprocess
 import sys
 import os
-import json
-import httpx
 from pathlib import Path
-from typing import List, Optional
-import asyncio
+from typing import List
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -18,18 +15,10 @@ class ProjectSetup:
     def __init__(self):
         self.project_root = Path.cwd()
         self.requirements = [
-            "langchain",
-            "langgraph", 
-            "faiss-cpu",
-            "gitpython",
+            "langchain", "langgraph", "faiss-cpu", "gitpython",
             "openai",  # For API wrapper compatibility
             "httpx",   # For async HTTP requests
-            "uvicorn",
-            "fastapi",
-            "streamlit",
-            "numpy",
-            "pandas",
-            "python-dotenv",
+            "uvicorn", "fastapi", "streamlit", "numpy", "pandas", "python-dotenv",
             "groq",    # Official Groq Python client
             "pydantic"
         ]
@@ -40,9 +29,9 @@ class ProjectSetup:
         for package in self.requirements:
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-                print(f"✅ {package} installed successfully")
+                print(f"{package} installed successfully")
             except subprocess.CalledProcessError:
-                print(f"❌ Failed to install {package}")
+                print(f"Failed to install {package}")
     
     def setup_environment(self):
         """Setup environment variables and .env file"""
@@ -51,14 +40,13 @@ class ProjectSetup:
         env_file = self.project_root / ".env"
         
         if not env_file.exists():
-            # Create .env template
             env_content = """# Groq API Configuration
 GROQ_API_KEY=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
 GROQ_BASE_URL=https://api.groq.com
 
 # Default Models
 DEFAULT_LLM_MODEL=llama3-70b-8192
-DEFAULT_EMBEDDING_MODEL=microsoft/codebert-base
+DEFAULT_EMBEDDING_MODEL=jinaai/jina-embeddings-v2-base-code
 
 # MCP Server Configuration
 MCP_HOST=0.0.0.0
@@ -70,10 +58,10 @@ TIMEOUT_SECONDS=60
 """
             with open(env_file, 'w') as f:
                 f.write(env_content)
-            print(f"✅ Created .env template at {env_file}")
-            print("⚠️  Please add your Groq API key to the .env file")
+            print(f"Created .env template at {env_file}")
+            print("Please add your Groq API key to the .env file")
         else:
-            print("✅ .env file already exists")
+            print(".env file already exists")
     
     def test_groq_connection(self):
         """Test connection to Groq API"""
@@ -81,7 +69,7 @@ TIMEOUT_SECONDS=60
         
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key or api_key == "your_groq_api_key_here":
-            print("❌ Groq API key not configured. Please set GROQ_API_KEY in .env file")
+            print("Groq API key not configured. Please set GROQ_API_KEY in .env file")
             return False
         
         try:
@@ -90,24 +78,18 @@ TIMEOUT_SECONDS=60
             client = Groq(api_key=api_key)
             
             # Test with a simple completion
-            completion = client.chat.completions.create(
-                messages=[
-                    {"role": "user", "content": "Hello, are you working?"}
-                ],
-                model="llama3-70b-8192",
-                max_tokens=100
-            )
+            completion = client.chat.completions.create(messages=[{"role": "user", "content": "Hello, are you working?"}],model="llama3-70b-8192",max_tokens=100)
             
             if completion.choices:
-                print("✅ Groq API connection successful")
+                print("Groq API connection successful")
                 print(f"Model response: {completion.choices[0].message.content[:100]}...")
                 return True
             else:
-                print("❌ Groq API returned no response")
+                print("Groq API returned no response")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error testing Groq API: {e}")
+            print(f"Error testing Groq API: {e}")
             return False
     
     def check_available_models(self):
@@ -116,7 +98,7 @@ TIMEOUT_SECONDS=60
         
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            print("❌ Groq API key not configured")
+            print("Groq API key not configured")
             return False
         
         try:
@@ -132,38 +114,25 @@ TIMEOUT_SECONDS=60
             return True
             
         except Exception as e:
-            print(f"❌ Error checking models: {e}")
+            print(f"Error checking models: {e}")
             return False
     
     def create_project_structure(self):
         """Create the project directory structure"""
         print("Creating project structure...")
-        directories = [
-            "data",
-            "src",
-            "tests",
-            "frontend",
-            "mcp_server",
-            "embeddings",
-            "cloned_repo"  # For storing cloned GitHub repos
-        ]
+        directories = [ "data", "src"]
         
         for dir_name in directories:
             dir_path = self.project_root / dir_name
             dir_path.mkdir(exist_ok=True)
-            print(f"✅ Created directory: {dir_name}")
+            print(f"Created directory: {dir_name}")
         
-        # Create __init__.py files
-        init_files = [
-            "src/__init__.py",
-            "tests/__init__.py", 
-            "mcp_server/__init__.py"
-        ]
+        init_files = ["src/__init__.py"]
         
         for init_file in init_files:
             init_path = self.project_root / init_file
             init_path.touch()
-            print(f"✅ Created: {init_file}")
+            print(f"Created: {init_file}")
     
     def run_complete_setup(self):
         """Run the complete setup process"""
@@ -197,11 +166,10 @@ TIMEOUT_SECONDS=60
         print("3. Run tests: python week1_groq_setup.py test")
         print("4. Move on to Week 2 implementation")
 
-
 # MCP Server with Groq Integration
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import uvicorn
 from groq import Groq
 import numpy as np
@@ -222,7 +190,7 @@ def get_groq_client():
 
 class EmbeddingRequest(BaseModel):
     text: str
-    model: str = "text-embedding-3-small"
+    model: str = "jina-embeddings-v2-base-code"
 
 class EmbeddingResponse(BaseModel):
     embedding: List[float]
@@ -361,7 +329,7 @@ class Week1Tests:
         
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key or api_key == "your_groq_api_key_here":
-            print("❌ Groq API key not configured")
+            print("Groq API key not configured")
             return False
         
         try:
@@ -378,15 +346,15 @@ class Week1Tests:
             )
             
             if completion.choices:
-                print("✅ Direct Groq API test successful")
+                print("Direct Groq API test successful")
                 print(f"Response preview: {completion.choices[0].message.content[:100]}...")
                 return True
             else:
-                print("❌ Direct Groq API test failed - no response")
+                print("Direct Groq API test failed - no response")
                 return False
                 
         except Exception as e:
-            print(f"❌ Direct Groq API test error: {e}")
+            print(f"Direct Groq API test error: {e}")
             return False
     
     def test_mcp_server(self):
@@ -400,21 +368,21 @@ class Week1Tests:
             with httpx.Client() as client:
                 response = client.get(f"{self.mcp_base_url}/")
                 if response.status_code == 200:
-                    print("✅ MCP server root endpoint working")
+                    print("MCP server root endpoint working")
                     data = response.json()
                     print(f"Server info: {data}")
                 else:
-                    print(f"❌ MCP server root endpoint failed: {response.status_code}")
+                    print(f"MCP server root endpoint failed: {response.status_code}")
                     return False
                 
                 # Test models endpoint
                 response = client.get(f"{self.mcp_base_url}/models")
                 if response.status_code == 200:
-                    print("✅ MCP models endpoint working")
+                    print("MCP models endpoint working")
                     models = response.json()
                     print(f"Available models: {len(models.get('models', []))}")
                 else:
-                    print(f"❌ MCP models endpoint failed: {response.status_code}")
+                    print(f"MCP models endpoint failed: {response.status_code}")
                 
                 # Test generate endpoint
                 response = client.post(
@@ -427,10 +395,10 @@ class Week1Tests:
                 )
                 if response.status_code == 200:
                     result = response.json()
-                    print("✅ MCP generate endpoint working")
+                    print("MCP generate endpoint working")
                     print(f"Response preview: {result.get('response', '')[:100]}...")
                 else:
-                    print(f"❌ MCP generate endpoint failed: {response.status_code}")
+                    print(f"MCP generate endpoint failed: {response.status_code}")
                 
                 # Test embedding endpoint
                 response = client.post(
@@ -443,14 +411,14 @@ class Week1Tests:
                 if response.status_code == 200:
                     result = response.json()
                     if len(result["embedding"]) == 768:
-                        print("✅ MCP embedding endpoint working")
+                        print("MCP embedding endpoint working")
                     else:
-                        print(f"❌ MCP embedding wrong dimension: {len(result['embedding'])}")
+                        print(f"MCP embedding wrong dimension: {len(result['embedding'])}")
                 else:
-                    print(f"❌ MCP embedding endpoint failed: {response.status_code}")
+                    print(f"MCP embedding endpoint failed: {response.status_code}")
                     
         except Exception as e:
-            print(f"❌ MCP server test error: {e}")
+            print(f"MCP server test error: {e}")
             return False
         
         return True
@@ -462,17 +430,17 @@ class Week1Tests:
         # Check .env file
         env_file = Path(".env")
         if env_file.exists():
-            print("✅ .env file exists")
+            print(".env file exists")
         else:
-            print("❌ .env file missing")
+            print(".env file missing")
             return False
         
         # Check API key
         api_key = os.getenv("GROQ_API_KEY")
         if api_key and api_key != "your_groq_api_key_here":
-            print("✅ Groq API key configured")
+            print("Groq API key configured")
         else:
-            print("❌ Groq API key not configured")
+            print("Groq API key not configured")
             return False
         
         return True
@@ -495,12 +463,12 @@ class Week1Tests:
             if groq_ok:
                 self.test_mcp_server()
             else:
-                print("⚠️  Skipping MCP server tests - Groq API not working")
+                print("Skipping MCP server tests - Groq API not working")
         else:
-            print("⚠️  Skipping API tests - Environment not configured")
+            print("Skipping API tests - Environment not configured")
         
         print("\n" + "=" * 40)
-        print("✅ Week 1 tests complete!")
+        print("Week 1 tests complete!")
         print("\nNext steps:")
         print("1. Ensure Groq API key is properly configured")
         print("2. Run MCP server in background for development")
