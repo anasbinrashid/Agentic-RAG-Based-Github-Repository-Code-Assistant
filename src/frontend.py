@@ -1,5 +1,5 @@
 # Streamlit Interface for Intelligent Code Assistant
-# Modern web interface for the Groq-powered RAG code assistant
+# Modern web interface for the Groq-powered RAG code assistant with session management
 
 import streamlit as st
 import os
@@ -17,6 +17,8 @@ import re
 from dataclasses import asdict
 import logging
 from typing import Optional
+import uuid
+import shutil
 
 # Import the agent with error handling
 try:
@@ -26,7 +28,7 @@ except ImportError as e:
     st.error(f"Failed to import required modules: {e}")
     st.error("Please check that all dependencies are installed correctly.")
     st.stop()
-
+    
 # Logger setup
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +36,108 @@ logging.basicConfig(level=logging.INFO)
 # Add helper methods to ChromaDBManager
 setattr(ChromaDBManager, "is_repository_already_stored", lambda self, repo_name: repo_name in self.get_all_repositories())
 setattr(ChromaDBManager, "get_languages_for_repo", lambda self, repo_name: self.get_all_repositories().get(repo_name, {}).get('languages', {}))
+
+# Session Management Functions
+class SessionManager:
+    def __init__(self, base_sessions_dir: str = "data/sessions"):
+        self.base_sessions_dir = Path(base_sessions_dir)
+        self.base_sessions_dir.mkdir(parents=True, exist_ok=True)
+    
+    def create_new_session(self) -> str:
+        """Create a new session folder and return session ID"""
+        session_id = str(uuid.uuid4())[:8]  # Short UUID
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_name = f"{timestamp}_{session_id}"
+        
+        session_path = self.base_sessions_dir / session_name
+        session_path.mkdir(exist_ok=True)
+        
+        # Create session metadata
+        metadata = {
+            "session_id": session_id,
+            "session_name": session_name,
+            "created_at": datetime.now().isoformat(),
+            "repositories_used": [],
+            "total_queries": 0,
+            "last_activity": datetime.now().isoformat()
+        }
+        
+        with open(session_path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Create subdirectories
+        (session_path / "conversations").mkdir(exist_ok=True)
+        (session_path / "exports").mkdir(exist_ok=True)
+        
+        return session_name
+    
+    def save_conversation(self, session_name: str, query: str, response: AgentResponse):
+        """Save a conversation to the session"""
+        session_path = self.base_sessions_dir / session_name
+        conversations_path = session_path / "conversations"
+        
+        # Create conversation entry
+        conversation_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "query": query,
+            "response": asdict(response)
+        }
+        
+        # Save individual conversation
+        conv_filename = f"conv_{int(time.time())}_{len(os.listdir(conversations_path)) + 1}.json"
+        with open(conversations_path / conv_filename, "w") as f:
+            json.dump(conversation_entry, f, indent=2)
+        
+        # Update session metadata
+        self.update_session_metadata(session_name, response)
+    
+    def update_session_metadata(self, session_name: str, response: AgentResponse):
+        """Update session metadata"""
+        session_path = self.base_sessions_dir / session_name
+        metadata_path = session_path / "metadata.json"
+        
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+        
+        # Update metadata
+        metadata["total_queries"] += 1
+        metadata["last_activity"] = datetime.now().isoformat()
+        
+        # Update repositories used
+        for source in response.sources:
+            repo_name = source.get('repository', 'unknown')
+            if repo_name not in metadata["repositories_used"]:
+                metadata["repositories_used"].append(repo_name)
+        
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+    
+    def get_all_sessions(self) -> list:
+        """Get all available sessions"""
+        sessions = []
+        for session_dir in self.base_sessions_dir.iterdir():
+            if session_dir.is_dir():
+                metadata_path = session_dir / "metadata.json"
+                if metadata_path.exists():
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                    sessions.append(metadata)
+        
+        return sorted(sessions, key=lambda x: x["created_at"], reverse=True)
+    
+    def load_session_conversations(self, session_name: str) -> list:
+        """Load all conversations from a session"""
+        session_path = self.base_sessions_dir / session_name
+        conversations_path = session_path / "conversations"
+        
+        conversations = []
+        if conversations_path.exists():
+            for conv_file in sorted(conversations_path.glob("*.json")):
+                with open(conv_file, "r") as f:
+                    conversation = json.load(f)
+                conversations.append(conversation)
+        
+        return conversations
 
 # Extend GitHubRepoProcessor with safer clone method
 def clone_repository(self, repo_url: str, local_name: Optional[str] = None) -> Path:
@@ -63,7 +167,16 @@ def clone_repository(self, repo_url: str, local_name: Optional[str] = None) -> P
 
 GitHubRepoProcessor.clone_repository = clone_repository
 
-# Updated process_repository using safe clone
+def get_repository_files(repo_name: str, db_path: str) -> list:
+    """Get list of files in a repository from ChromaDB"""
+    try:
+        chroma_manager = ChromaDBManager(db_path)
+        # This would require implementing a method in ChromaDBManager to get file list
+        # For now, we'll return a placeholder
+        return [f"File listing for {repo_name} - Implementation needed in ChromaDBManager"]
+    except Exception as e:
+        logger.error(f"Error getting repository files: {e}")
+        return []
 
 def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
     """Process a repository by cloning and chunking it, or load if already processed"""
@@ -73,6 +186,8 @@ def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
 
         # Check if repository is already processed
         if chroma_manager.is_repository_already_stored(repo_name):
+            # Get files from filesystem for already processed repos
+            files = get_repository_files_from_filesystem(repo_name, f"{settings['base_dir']}/repos")
             progress_queue.put({
                 "status": "success",
                 "message": f"Repository '{repo_name}' already processed. Loaded from backend.",
@@ -80,7 +195,9 @@ def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
                     "files_processed": 0,
                     "chunks_created": 0,
                     "languages": chroma_manager.get_languages_for_repo(repo_name)
-                }
+                },
+                "files": files,
+                "repo_name": repo_name
             })
             return
 
@@ -93,6 +210,15 @@ def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
         # Clone and process
         repo_path = repo_processor.clone_repository(repo_url, repo_name)
         progress_queue.put({"status": "cloned", "message": f"Repository cloned to {repo_path}"})
+
+        # Get list of all files immediately after cloning
+        all_files = get_repository_files_from_filesystem(repo_name, f"{settings['base_dir']}/repos")
+        progress_queue.put({
+            "status": "files_listed", 
+            "message": f"Found {len(all_files)} files",
+            "files": all_files,
+            "repo_name": repo_name
+        })
 
         progress_queue.put({"status": "processing", "message": "Processing files..."})
         files = repo_processor.find_processable_files(repo_path)
@@ -123,11 +249,14 @@ def process_repository(repo_url: str, progress_queue: Queue, settings: dict):
                 "files_processed": len(files),
                 "chunks_created": len(all_chunks),
                 "languages": repo_metadata.languages
-            }
+            },
+            "files": all_files,
+            "repo_name": repo_name
         })
 
     except Exception as e:
         progress_queue.put({"status": "error", "message": f"Error processing repository: {str(e)}"})
+
 # Page config
 st.set_page_config(
     page_title="🤖 Intelligent Code Assistant",
@@ -150,6 +279,31 @@ st.markdown("""
         color: white;
         text-align: center;
         margin-bottom: 2rem;
+    }
+    
+    .session-card {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #667eea;
+        margin: 0.5rem 0;
+    }
+    
+    .current-session {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+    }
+    
+    .file-list {
+        background: #f8f9fa;
+        padding: 0.5rem;
+        border-radius: 4px;
+        margin: 0.2rem 0;
+        font-family: monospace;
+        font-size: 0.8rem;
     }
     
     .query-box {
@@ -185,7 +339,6 @@ st.markdown("""
     }
     
     .source-card {
-            
         background: #f8f9fa;
         padding: 0.8rem;
         border-radius: 6px;
@@ -200,31 +353,18 @@ st.markdown("""
         border-radius: 8px;
         text-align: center;
     }
-    
-    .stButton > button {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        border-radius: 6px;
-        padding: 0.5rem 1rem;
-        font-weight: bold;
-    }
-    
-    .stTextArea > div > div > textarea {
-        border-radius: 8px;
-        border: 2px solid #e9ecef;
-    }
-    
-    .stTextArea > div > div > textarea:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize session state
 def init_session_state():
     """Initialize session state variables"""
+    if 'session_manager' not in st.session_state:
+        st.session_state.session_manager = SessionManager()
+    
+    if 'current_session' not in st.session_state:
+        st.session_state.current_session = st.session_state.session_manager.create_new_session()
+    
     if 'agent' not in st.session_state:
         st.session_state.agent = None
     if 'conversation_history' not in st.session_state:
@@ -244,7 +384,8 @@ def init_session_state():
         st.session_state.processing_status = None
     if 'processing_queue' not in st.session_state:
         st.session_state.processing_queue = Queue()
-
+    if 'repo_files' not in st.session_state:
+        st.session_state.repo_files = {}
 def load_agent():
     """Load and initialize the agent with better error handling"""
     try:
@@ -273,7 +414,30 @@ def load_agent():
         st.error(f"❌ Critical error initializing agent: {str(e)}")
         st.error("Please check your environment setup and try again.")
         return False
-
+def get_repository_files_from_filesystem(repo_name: str, base_dir: str = "data/repos") -> list:
+    """Get list of files in a repository from the filesystem"""
+    try:
+        repo_path = Path(base_dir) / repo_name
+        if not repo_path.exists():
+            return []
+        
+        files = []
+        # Walk through all files in the repository
+        for file_path in repo_path.rglob("*"):
+            if file_path.is_file():
+                # Skip common directories we don't want to show
+                skip_dirs = {'.git', '__pycache__', 'node_modules', '.vscode', '.idea', 'dist', 'build'}
+                if any(skip_dir in file_path.parts for skip_dir in skip_dirs):
+                    continue
+                
+                # Get relative path from repo root
+                relative_path = file_path.relative_to(repo_path)
+                files.append(str(relative_path))
+        
+        return sorted(files)
+    except Exception as e:
+        logger.error(f"Error getting repository files from filesystem: {e}")
+        return []
 def get_confidence_color(confidence: float) -> str:
     """Get color class based on confidence score"""
     if confidence >= 0.7:
@@ -300,11 +464,120 @@ def render_main_header():
     """, unsafe_allow_html=True)
 
 def render_sidebar():
-    """Render the sidebar with settings and stats"""
+    """Render the sidebar with session management and repository info"""
     with st.sidebar:
+        # Current Session Info
+        st.header("📝 Current Session")
+        
+        current_session_info = f"""
+        <div class="current-session">
+            <strong>Session ID:</strong> {st.session_state.current_session}<br>
+            <strong>Queries:</strong> {len(st.session_state.conversation_history)}<br>
+            <strong>Created:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}
+        </div>
+        """
+        st.markdown(current_session_info, unsafe_allow_html=True)
+        
+        # Session Management
+        if st.button("🆕 New Session", type="secondary"):
+            st.session_state.current_session = st.session_state.session_manager.create_new_session()
+            st.session_state.conversation_history = []
+            st.session_state.current_response = None
+            st.rerun()
+        
+        st.divider()
+        
+        # Repository Information
+        st.header("📚 Repository Files")
+        
+        # Get available repositories from both stats and repo_files
+        available_repos = set()
+        if st.session_state.stats:
+            available_repos.update(st.session_state.stats.get('repositories', {}).keys())
+        if st.session_state.repo_files:
+            available_repos.update(st.session_state.repo_files.keys())
+        
+        if available_repos:
+            selected_repo = st.selectbox(
+                "Select Repository:",
+                options=list(available_repos),
+                key="repo_selector"
+            )
+            
+            if selected_repo:
+                st.markdown(f"**Repository:** {selected_repo}")
+                
+                # Show chunk count if available
+                repositories = st.session_state.stats.get('repositories', {})
+                if selected_repo in repositories:
+                    st.markdown(f"**Chunks:** {repositories[selected_repo]}")
+                
+                # Get languages for this repo
+                languages = st.session_state.stats.get('languages', {})
+                if languages:
+                    st.markdown("**Languages:**")
+                    for lang, count in languages.items():
+                        st.markdown(f"• {lang}: {count} files")
+                
+                # Display actual files from the repository
+                if selected_repo in st.session_state.repo_files:
+                    files = st.session_state.repo_files[selected_repo]
+                    
+                    with st.expander(f"📄 Files ({len(files)} total)", expanded=True):
+                        # Add search functionality
+                        search_term = st.text_input("🔍 Search files:", key=f"search_{selected_repo}")
+                        
+                        # Filter files based on search
+                        if search_term:
+                            filtered_files = [f for f in files if search_term.lower() in f.lower()]
+                        else:
+                            filtered_files = files
+                        
+                        # Group files by directory for better organization
+                        file_tree = {}
+                        for file_path in filtered_files:
+                            parts = file_path.split('/')
+                            if len(parts) == 1:
+                                # Root level file
+                                if '📄 Root Files' not in file_tree:
+                                    file_tree['📄 Root Files'] = []
+                                file_tree['📄 Root Files'].append(file_path)
+                            else:
+                                # File in subdirectory
+                                dir_name = f"📁 {parts[0]}/"
+                                if dir_name not in file_tree:
+                                    file_tree[dir_name] = []
+                                file_tree[dir_name].append(file_path)
+                        
+                        # Display files organized by directory
+                        for dir_name, dir_files in sorted(file_tree.items()):
+                            if len(dir_files) > 5:  # Use expander for directories with many files
+                                with st.expander(f"{dir_name} ({len(dir_files)} files)"):
+                                    for file_path in sorted(dir_files):
+                                        st.markdown(f"<div class='file-list'>📄 {file_path}</div>", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"**{dir_name}**")
+                                for file_path in sorted(dir_files):
+                                    st.markdown(f"<div class='file-list'>📄 {file_path}</div>", unsafe_allow_html=True)
+                        
+                        if search_term and not filtered_files:
+                            st.info(f"No files found matching '{search_term}'")
+                else:
+                    # Try to load files from filesystem if not in session state
+                    files = get_repository_files_from_filesystem(selected_repo)
+                    if files:
+                        st.session_state.repo_files[selected_repo] = files
+                        st.rerun()  # Refresh to show the files
+                    else:
+                        st.info("No files found for this repository.")
+        else:
+            st.info("No repositories loaded. Add repositories in the Repository Manager tab.")
+        
+        st.divider()
+        
+        # Model Settings (simplified)
         st.header("⚙️ Settings")
         
-        # Model selection
         available_models = [
             "llama3-8b-8192",
             "llama3-70b-8192", 
@@ -313,10 +586,9 @@ def render_sidebar():
         ]
         
         new_model = st.selectbox(
-            "🧠 Model",
+            "Model:",
             available_models,
             index=available_models.index(st.session_state.settings['model']),
-            help="Choose the language model for processing queries"
         )
         
         if new_model != st.session_state.settings['model']:
@@ -324,95 +596,14 @@ def render_sidebar():
             st.session_state.agent = None  # Force re-initialization
             st.rerun()
         
-        # Database path
-        db_path = st.text_input(
-            "💾 Database Path",
-            value=st.session_state.settings['db_path'],
-            help="Path to your ChromaDB database"
-        )
-        
-        if db_path != st.session_state.settings['db_path']:
-            st.session_state.settings['db_path'] = db_path
-            st.session_state.agent = None  # Force re-initialization
-        
-        # Base directory
-        base_dir = st.text_input(
-            "📁 Base Directory",
-            value=st.session_state.settings['base_dir'],
-            help="Base directory for storing repositories and data"
-        )
-        
-        if base_dir != st.session_state.settings['base_dir']:
-            st.session_state.settings['base_dir'] = base_dir
-        
-        # Max history
-        st.session_state.settings['max_history'] = st.slider(
-            "📚 Max History",
-            min_value=10,
-            max_value=100,
-            value=st.session_state.settings['max_history'],
-            help="Maximum number of queries to keep in history"
-        )
-        
-        st.divider()
-        
-        # Stats section
-        st.header("📊 Statistics")
-        
-        if st.session_state.agent and st.button("🔄 Refresh Stats"):
-            try:
-                with st.spinner("Loading stats..."):
-                    st.session_state.stats = st.session_state.agent.get_stats()
-            except Exception as e:
-                st.error(f"Failed to load stats: {e}")
-        
-        if st.session_state.stats:
-            stats = st.session_state.stats
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Chunks", stats.get('total_chunks', 0))
-            with col2:
-                st.metric("Languages", len(stats.get('languages', {})))
-            
-            st.metric("Repositories", len(stats.get('repositories', {})))
-            
-            # Top languages chart
-            languages = stats.get('languages', {})
-            if languages:
-                st.subheader("🔤 Language Distribution")
-                lang_df = pd.DataFrame(
-                    list(languages.items()), 
-                    columns=['Language', 'Count']
-                ).sort_values('Count', ascending=False).head(8)
-                
-                fig = px.pie(
-                    lang_df, 
-                    values='Count', 
-                    names='Language',
-                    color_discrete_sequence=px.colors.qualitative.Set3
-                )
-                fig.update_layout(height=300)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        st.divider()
-        
-        # Session info
-        st.header("📝 Session Info")
-        st.metric("Queries Asked", len(st.session_state.conversation_history))
-        
-        if st.session_state.conversation_history:
-            avg_confidence = sum(
-                item['response'].confidence 
-                for item in st.session_state.conversation_history
-            ) / len(st.session_state.conversation_history)
-            st.metric("Avg Confidence", f"{avg_confidence:.2f}")
-        
-        # Clear history button
-        if st.button("🗑️ Clear History", type="secondary"):
-            st.session_state.conversation_history = []
-            st.session_state.current_response = None
-            st.rerun()
+        # Refresh Stats
+        if st.button("🔄 Refresh Stats"):
+            if st.session_state.agent:
+                try:
+                    with st.spinner("Loading stats..."):
+                        st.session_state.stats = st.session_state.agent.get_stats()
+                except Exception as e:
+                    st.error(f"Failed to load stats: {e}")
 
 def render_query_examples():
     """Render example queries"""
@@ -466,13 +657,13 @@ def render_response(response: AgentResponse):
         </div>
         """, unsafe_allow_html=True)
     
-    with col4:
-        st.markdown(f"""
-        <div class="metrics-card">
-            <h4>Sources</h4>
-            <p>{len(response.sources)}</p>
-        </div>
-        """, unsafe_allow_html=True)
+    # with col4:
+    #     st.markdown(f"""
+    #     <div class="metrics-card">
+    #         <h4>Sources</h4>
+    #         <p>{len(response.sources)}</p>
+    #     </div>
+    #     """, unsafe_allow_html=True)
     
     st.markdown("</div>", unsafe_allow_html=True)
     
@@ -485,38 +676,38 @@ def render_response(response: AgentResponse):
         st.subheader("🧠 Reasoning")
         st.info(response.reasoning)
     
-    # Sources
-    if response.sources:
-        st.subheader("📚 Sources Used")
+    # # Sources
+    # if response.sources:
+    #     st.subheader("📚 Sources Used")
         
-        # Create DataFrame for sources table
-        sources_data = []
-        for i, source in enumerate(response.sources, 1):
-            sources_data.append({
-                "#": i,
-                "File": source['filename'],
-                "Repository": source['repository'],
-                "Language": source['language'],
-                "Lines": source['lines'],
-                "Relevance": f"{source['relevance_score']:.3f}"
-            })
+    #     # Create DataFrame for sources table
+    #     sources_data = []
+    #     for i, source in enumerate(response.sources, 1):
+    #         sources_data.append({
+    #             "#": i,
+    #             "File": source['filename'],
+    #             "Repository": source['repository'],
+    #             "Language": source['language'],
+    #             "Lines": source['lines'],
+    #             "Relevance": f"{source['relevance_score']:.3f}"
+    #         })
         
-        sources_df = pd.DataFrame(sources_data)
-        st.dataframe(sources_df, use_container_width=True)
+    #     sources_df = pd.DataFrame(sources_data)
+    #     st.dataframe(sources_df, use_container_width=True)
         
-        # Detailed source cards
-        with st.expander("🔍 Detailed Source Information"):
-            for i, source in enumerate(response.sources, 1):
-                st.markdown(f"""
-                <div class="source-card">
-                    <strong>Source {i}: {source['filename']}</strong><br>
-                    📁 Repository: {source['repository']}<br>
-                    🔤 Language: {source['language']}<br>
-                    📏 Lines: {source['lines']}<br>
-                    📊 Relevance Score: {source['relevance_score']:.3f}<br>
-                    📂 Path: {source.get('file_path', 'N/A')}
-                </div>
-                """, unsafe_allow_html=True)
+    #     # Detailed source cards
+    #     with st.expander("🔍 Detailed Source Information"):
+    #         for i, source in enumerate(response.sources, 1):
+    #             st.markdown(f"""
+    #             <div class="source-card">
+    #                 <strong>Source {i}: {source['filename']}</strong><br>
+    #                 📁 Repository: {source['repository']}<br>
+    #                 🔤 Language: {source['language']}<br>
+    #                 📏 Lines: {source['lines']}<br>
+    #                 📊 Relevance Score: {source['relevance_score']:.3f}<br>
+    #                 📂 Path: {source.get('file_path', 'N/A')}
+    #             </div>
+    #             """, unsafe_allow_html=True)
     
     # Export options
     st.subheader("💾 Export Options")
@@ -556,14 +747,14 @@ def render_response(response: AgentResponse):
 
 ## Reasoning
 {response.reasoning}
-
-## Sources
 """
-        for i, source in enumerate(response.sources, 1):
-            markdown_report += f"\n{i}. **{source['filename']}** ({source['language']})\n"
-            markdown_report += f"   - Repository: {source['repository']}\n"
-            markdown_report += f"   - Lines: {source['lines']}\n"
-            markdown_report += f"   - Relevance: {source['relevance_score']:.3f}\n"
+## Sources
+#"""
+        # for i, source in enumerate(response.sources, 1):
+        #     markdown_report += f"\n{i}. **{source['filename']}** ({source['language']})\n"
+        #     markdown_report += f"   - Repository: {source['repository']}\n"
+        #     markdown_report += f"   - Lines: {source['lines']}\n"
+        #     markdown_report += f"   - Relevance: {source['relevance_score']:.3f}\n"
         
         st.download_button(
             "📝 Download Report",
@@ -578,7 +769,7 @@ def render_conversation_history():
         st.info("No conversation history yet. Start by asking a question!")
         return
     
-    st.subheader("📚 Conversation History")
+    st.subheader("📚 Current Session History")
     
     # History controls
     col1, col2, col3 = st.columns(3)
@@ -632,14 +823,57 @@ def render_conversation_history():
                 st.session_state.current_query = response.query
                 st.rerun()
 
+def render_session_history_tab():
+    """Render the session history tab"""
+    st.header("📂 Session History")
+    
+    all_sessions = st.session_state.session_manager.get_all_sessions()
+    
+    if not all_sessions:
+        st.info("No previous sessions found.")
+        return
+    
+    st.subheader("🗂️ Previous Sessions")
+    
+    for session in all_sessions:
+        with st.expander(f"📅 Session: {session['session_name']} | Created: {session['created_at'][:16]} | Queries: {session['total_queries']}"):
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**Session ID:** {session['session_id']}")
+                st.markdown(f"**Total Queries:** {session['total_queries']}")
+                st.markdown(f"**Last Activity:** {session['last_activity'][:16]}")
+            
+            with col2:
+                st.markdown("**Repositories Used:**")
+                if session['repositories_used']:
+                    for repo in session['repositories_used']:
+                        st.markdown(f"• {repo}")
+                else:
+                    st.markdown("• No repositories used")
+            
+            # Load conversations button
+            if st.button(f"📖 Load Conversations", key=f"load_{session['session_name']}"):
+                conversations = st.session_state.session_manager.load_session_conversations(session['session_name'])
+                
+                if conversations:
+                    st.markdown("### 💬 Conversations")
+                    for conv in conversations:
+                        st.markdown(f"**Query:** {conv['query']}")
+                        st.markdown(f"**Answer:** {conv['response']['answer'][:200]}...")
+                        st.markdown(f"**Timestamp:** {conv['timestamp']}")
+                        st.divider()
+                else:
+                    st.info("No conversations found in this session.")
+
 def is_valid_git_url(url: str) -> bool:
     """Validate if the URL is a valid git repository URL"""
     git_patterns = [
-        r'^https://github\.com/[\w\-\.]+/[\w\-\.]+(?:\.git)?/?$',
-        r'^https://gitlab\.com/[\w\-\.]+/[\w\-\.]+(?:\.git)?/?$',
-        r'^https://bitbucket\.org/[\w\-\.]+/[\w\-\.]+(?:\.git)?/?$',
-        r'^git@github\.com:[\w\-\.]+/[\w\-\.]+\.git$',
-        r'^git@gitlab\.com:[\w\-\.]+/[\w\-\.]+\.git$',
+        r'^https://github\.com/[\w\-\.]+/[\w\-\.]+(?:\.git)?/?',
+        r'^https://gitlab\.com/[\w\-\.]+/[\w\-\.]+(?:\.git)?/?',
+        r'^https://bitbucket\.org/[\w\-\.]+/[\w\-\.]+(?:\.git)?/?',
+        r'^git@github\.com:[\w\-\.]+/[\w\-\.]+\.git',
+        r'^git@gitlab\.com:[\w\-\.]+/[\w\-\.]+\.git',
     ]
     
     return any(re.match(pattern, url.strip()) for pattern in git_patterns)
@@ -651,7 +885,6 @@ def extract_repo_name(url: str) -> str:
     if path.endswith('.git'):
         path = path[:-4]
     return path.split('/')[-1] if '/' in path else path
-
 
 def render_repository_manager():
     """Render repository management interface"""
@@ -723,6 +956,11 @@ def render_repository_manager():
                         st.info(f"🔄 {update['message']}")
                     elif update["status"] == "cloned":
                         st.success(f"✅ {update['message']}")
+                    elif update["status"] == "files_listed":
+                        st.info(f"📄 {update['message']}")
+                        # Store files in session state immediately
+                        if 'files' in update and 'repo_name' in update:
+                            st.session_state.repo_files[update['repo_name']] = update['files']
                     elif update["status"] == "processing":
                         st.info(f"⚙️ {update['message']}")
                     elif update["status"] == "chunking":
@@ -731,6 +969,10 @@ def render_repository_manager():
                         st.info(f"📥 {update['message']}")
                     elif update["status"] == "success":
                         st.success(f"🎉 {update['message']}")
+                        # Store files in session state
+                        if 'files' in update and 'repo_name' in update:
+                            st.session_state.repo_files[update['repo_name']] = update['files']
+                        
                         if 'stats' in update:
                             stats = update['stats']
                             col1, col2, col3 = st.columns(3)
@@ -773,9 +1015,12 @@ def render_repository_manager():
             # Create DataFrame for repositories
             repo_data = []
             for repo_name, count in repositories.items():
+                # Add file count if available
+                file_count = len(st.session_state.repo_files.get(repo_name, []))
                 repo_data.append({
                     "Repository": repo_name,
-                    "Chunks": count
+                    "Chunks": count,
+                    "Files": file_count if file_count > 0 else "Loading..."
                 })
             
             repo_df = pd.DataFrame(repo_data)
@@ -800,7 +1045,7 @@ def main():
     render_sidebar()
     
     # Main content area
-    tab1, tab2, tab3, tab4 = st.tabs(["🔍 Query Assistant", "📂 Repository Manager", "📚 History", "ℹ️ About"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Query Assistant", "📂 Repository Manager", "📚 Current Session", "🗂️ Session History", "ℹ️ About"])
     
     with tab1:
         # Load agent
@@ -858,6 +1103,13 @@ def main():
                         # Store response
                         st.session_state.current_response = response
                         
+                        # Save to session
+                        st.session_state.session_manager.save_conversation(
+                            st.session_state.current_session, 
+                            query, 
+                            response
+                        )
+                        
                         # Add to history
                         history_item = {
                             'query': query,
@@ -900,6 +1152,9 @@ def main():
         render_conversation_history()
     
     with tab4:
+        render_session_history_tab()
+    
+    with tab5:
         st.header("ℹ️ About")
         
         st.markdown("""
@@ -915,25 +1170,33 @@ def main():
         - **Streamlit**: Modern web interface
 
         ### 🎯 Features
+        - **Session Management**: Each session is automatically saved with conversation history
         - **Intelligent Query Processing**: Analyzes your questions to determine the best retrieval strategy
         - **Multi-Language Support**: Works with Python, JavaScript, Java, Go, C++, Rust, and more
         - **Context-Aware Responses**: Provides detailed answers based on your actual codebase
         - **Source Attribution**: Shows exactly which code files informed each response
-        - **Conversation History**: Keeps track of your queries and responses
+        - **Conversation History**: Keeps track of your queries and responses across sessions
         - **Repository Management**: Add and process new repositories through the UI
 
-        ### 📊 Query Types Supported
-        - **Code Explanation**: Understanding how specific code works
-        - **Implementation Guidance**: How to implement features or patterns
-        - **Debugging Help**: Finding and fixing issues in code
-        - **Code Search**: Locating specific functionality or patterns
-        - **Architecture Analysis**: Understanding system design and structure
-        - **Best Practices**: Learning recommended approaches and patterns
+        ### 📊 Session Features
+        - **Automatic Session Creation**: New session created on startup
+        - **Persistent Storage**: All conversations saved to disk
+        - **Session History**: Access previous sessions and their conversations
+        - **Repository Tracking**: Track which repositories were used in each session
 
-        ### ⚙️ Setup Requirements
-        1. **GROQ_API_KEY**: Set your Groq API key in environment variables
-        2. **Git**: Required for repository cloning
-        3. **Python Dependencies**: Install required Python packages
+        ### 📂 File Structure
+        ```
+        data/
+        ├── sessions/
+        │   ├── 20241225_143022_a1b2c3d4/
+        │   │   ├── metadata.json
+        │   │   ├── conversations/
+        │   │   │   ├── conv_1703516222_1.json
+        │   │   │   └── conv_1703516245_2.json
+        │   │   └── exports/
+        │   └── 20241225_150015_e5f6g7h8/
+        └── chromadb/
+        ```
 
         ### 💡 Tips for Better Results
         - Be specific in your queries
@@ -943,7 +1206,7 @@ def main():
 
         ---
         
-        **Version**: 1.0 | **Powered by**: Groq + Llama | **Built with**: Streamlit
+        **Version**: 2.0 | **Powered by**: Groq + Llama | **Built with**: Streamlit
         """)
 
 if __name__ == "__main__":
