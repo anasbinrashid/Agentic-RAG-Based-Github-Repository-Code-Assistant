@@ -18,9 +18,14 @@ from dataclasses import asdict
 import logging
 from typing import Optional
 
-# Import the agent
-from agent import GroqCodeAgent, AgentResponse
-from chunker_embedder import GitHubRepoProcessor, CodeChunker, ChromaDBManager
+# Import the agent with error handling
+try:
+    from agent import GroqCodeAgent, AgentResponse
+    from chunker_embedder import GitHubRepoProcessor, CodeChunker, ChromaDBManager
+except ImportError as e:
+    st.error(f"Failed to import required modules: {e}")
+    st.error("Please check that all dependencies are installed correctly.")
+    st.stop()
 
 # Logger setup
 logger = logging.getLogger(__name__)
