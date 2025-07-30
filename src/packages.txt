@@ -1,8 +1,0 @@
-# System packages needed for ChromaDB and other dependencies
-build-essential
-git
-libsqlite3-dev
-libffi-dev
-libssl-dev
-python3-dev
-pkg-config
