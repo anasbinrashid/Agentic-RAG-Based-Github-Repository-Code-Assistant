@@ -20,6 +20,9 @@ from typing import Optional
 import uuid
 import shutil
 
+os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
+os.environ['STREAMLIT_SERVER_HEADLESS'] = 'true'
+
 # Import the agent with error handling
 try:
     from agent import GroqCodeAgent, AgentResponse
