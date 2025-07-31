@@ -1184,20 +1184,6 @@ def main():
         - **Session History**: Access previous sessions and their conversations
         - **Repository Tracking**: Track which repositories were used in each session
 
-        ### 📂 File Structure
-        ```
-        data/
-        ├── sessions/
-        │   ├── 20241225_143022_a1b2c3d4/
-        │   │   ├── metadata.json
-        │   │   ├── conversations/
-        │   │   │   ├── conv_1703516222_1.json
-        │   │   │   └── conv_1703516245_2.json
-        │   │   └── exports/
-        │   └── 20241225_150015_e5f6g7h8/
-        └── chromadb/
-        ```
-
         ### 💡 Tips for Better Results
         - Be specific in your queries
         - Mention the programming language when relevant

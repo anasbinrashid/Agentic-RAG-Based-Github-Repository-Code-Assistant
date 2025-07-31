@@ -1,0 +1,16 @@
+=== QUERY EXPANSION LOG ===
+Created: 2025-07-30 16:57:17
+==================================================
+
+[2025-07-30 16:58:04]
+Session: session_20250730_165717
+Original Query: Compare different sorting algorithms used here
+Language: Any
+Intent: comparison
+Expansions Generated: 3
+Expanded Queries:
+  1. Compare different sorting algorithms used here
+  2. sorting algorithm benchmarking and comparison
+  3. efficiency analysis of sort implementations
+----------------------------------------
+
